@@ -43,21 +43,26 @@
    - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-0.1.0-macos-arm64.dmg`
    - **Intel Mac**: `Uya-0.1.0-macos-x64.dmg`
 2. `.dmg` файлын ашып, **Uya** қолданбасын **Applications** папкасына сүйреп апарыңыз.
-3. Қол қойылмаған жинақты алғаш ашқанда macOS Gatekeeper бұғаттаса, карантин белгісін бір рет алып тастаңыз:
-   ```sh
-   xattr -cr "/Applications/Uya.app"
-   ```
+3. macOS Gatekeeper қолданбаны алғаш ашқанда бұғаттаса, жүктелген файлды тексеріп, [Apple ұсынған Open Anyway нұсқаулығын](https://support.apple.com/en-us/102445) орындаңыз.
 
 ### Windows (10 / 11, 64-bit)
 1. [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0) бетінен орнатқышты жүктеп алыңыз:
    - **Ұсынылатын орнатқыш (әкімші құқығынсыз)**: `Uya-0.1.0-windows-x64-setup.exe`
    - **MSI бумасы**: `Uya-0.1.0-windows-x64.msi`
 2. Орнатқышты іске қосыңыз (Windows 11-де WebView2 алдын ала орнатылған, ал Windows 10-да қажет болса автоматты жүктеледі).
-3. Windows Defender SmartScreen ескертуі шықса, **More info → Run anyway** (Толығырақ → Бәрібір іске қосу) басыңыз.
+3. Орнатқыштарға цифрлық қолтаңба қойылмаған. SmartScreen ескертуі шықса, алдымен жүктелген файлды тексеріңіз, содан кейін **More info → Run anyway** түймесін басыңыз.
 
 ### Тұтастықты тексеру (міндетті емес)
+Орнатқыш тұрған қалтаға `SHA256SUMS.txt` файлын жүктеп алыңыз. macOS жүйесінде:
+
 ```sh
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
+Windows жүйесінде нәтижені `SHA256SUMS.txt` файлындағы сәйкес жолмен салыстырыңыз:
+
+```powershell
+Get-FileHash .\Uya-0.1.0-windows-x64-setup.exe -Algorithm SHA256
 ```
 
 ## Бастапқы кодтан жинау

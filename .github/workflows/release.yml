@@ -5,14 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Optional tag name to build (defaults to current ref; only tag pushes publish a GitHub Release)"
-        required: false
-        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
 
 jobs:
   verify:
@@ -31,6 +29,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Verify release version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { version } = require('./package.json');
+          const desktop = require('./apps/desktop/package.json');
+          const tauri = require('./apps/desktop/src-tauri/tauri.conf.json');
+          const tag = process.env.GITHUB_REF_NAME;
+          if (tag !== `v${version}` || desktop.version !== version || tauri.version !== version) {
+            throw new Error(`Version mismatch: tag=${tag}, workspace=${version}, desktop=${desktop.version}, Tauri=${tauri.version}`);
+          }
+          NODE
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,16 +65,18 @@ jobs:
   build-macos:
     name: Build macOS (${{ matrix.label }})
     needs: verify
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
+            runner: macos-15
             label: Apple Silicon
           - target: x86_64-apple-darwin
             arch: x64
+            runner: macos-15-intel
             label: Intel
     steps:
       - name: Checkout repository
@@ -93,6 +107,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build Uya desktop bundle (.app & .dmg)
+        shell: bash
         env:
           CI: "true"
           TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
@@ -102,7 +117,15 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --target ${{ matrix.target }} --bundles app,dmg
+        run: |
+          # GitHub sets missing secrets to empty strings, which Tauri treats as supplied.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then unset "$name"; fi
+          done
+          if [[ -z "${APPLE_CERTIFICATE:-}" && -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+            export APPLE_SIGNING_IDENTITY=-
+          fi
+          bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --target ${{ matrix.target }} --bundles app,dmg
 
       - name: Collect release assets
         shell: bash
@@ -125,6 +148,10 @@ jobs:
             echo "No Uya.app bundle found in $BUNDLE_DIR/macos" >&2
             exit 1
           fi
+          codesign --verify --deep --strict "$APP_DIR"
+          lipo -verify_arch "$(uname -m)" "$APP_DIR/Contents/MacOS/uya"
+          lipo -verify_arch "$(uname -m)" "$APP_DIR/Contents/MacOS/uya-core"
+          hdiutil verify "$DMG_FILE"
           ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$OUT_DIR/Uya-${VERSION}-macos-${{ matrix.arch }}.app.zip"
           ls -lh "$OUT_DIR"
 
@@ -204,8 +231,10 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [build-macos, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -216,11 +245,26 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Generate SHA-256 checksums
+      - name: Verify release assets and generate SHA-256 checksums
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           cd release-assets
+          files=(
+            "Uya-${VERSION}-macos-arm64.dmg"
+            "Uya-${VERSION}-macos-arm64.app.zip"
+            "Uya-${VERSION}-macos-x64.dmg"
+            "Uya-${VERSION}-macos-x64.app.zip"
+            "Uya-${VERSION}-windows-x64-setup.exe"
+            "Uya-${VERSION}-windows-x64.msi"
+          )
+          for file in "${files[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "Missing or empty release asset: $file" >&2
+              exit 1
+            fi
+          done
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -254,30 +298,21 @@ jobs:
             echo ""
             echo "- **Checksums:** \`SHA256SUMS.txt\`"
             echo ""
-            echo "### First Launch Notes (Unsigned Builds)"
+            echo "### First Launch"
             echo ""
-            echo "- **macOS Gatekeeper:** After moving **Uya.app** to \`/Applications\`, run:"
-            echo ""
-            echo '```sh'
-            echo 'xattr -cr "/Applications/Uya.app"'
-            echo '```'
-            echo ""
-            echo "- **Windows SmartScreen:** If Windows Defender SmartScreen displays *Windows protected your PC*, click **More info → Run anyway**."
+            echo "- **macOS:** If Gatekeeper blocks the app, follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445)."
+            echo "- **Windows:** The installers are unsigned. If SmartScreen displays *Windows protected your PC*, check the download against \`SHA256SUMS.txt\` before selecting **More info → Run anyway**."
           } > release-notes.md
           cat release-notes.md
 
-      - name: Create or update GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/* --clobber
-            gh release edit "$TAG" --notes-file release-notes.md
-          else
-            gh release create "$TAG" release-assets/* \
-              --title "Uya ${TAG}" \
-              --notes-file release-notes.md
-          fi
+          gh release create "$TAG" release-assets/* \
+            --verify-tag \
+            --title "Uya ${TAG}" \
+            --notes-file release-notes.md

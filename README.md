@@ -43,21 +43,27 @@ Prebuilt desktop installers are published on [GitHub Releases](https://github.co
    - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-0.1.0-macos-arm64.dmg`
    - **Intel Mac**: `Uya-0.1.0-macos-x64.dmg`
 2. Open the `.dmg` and drag **Uya** into **Applications**.
-3. If macOS Gatekeeper blocks the first launch on an unsigned build, clear the quarantine attribute once:
-   ```sh
-   xattr -cr "/Applications/Uya.app"
-   ```
+3. If macOS Gatekeeper blocks the first launch, verify the download and follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445).
 
 ### Windows (10 / 11, 64-bit)
 1. Download the installer from [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0):
    - **Recommended (per-user, no admin required)**: `Uya-0.1.0-windows-x64-setup.exe`
    - **MSI package**: `Uya-0.1.0-windows-x64.msi`
 2. Run the installer (WebView2 is included on Windows 11 and bootstrapped automatically on Windows 10 if needed).
-3. If Windows Defender SmartScreen displays *"Windows protected your PC"* on an unsigned build, click **More info → Run anyway**.
+3. The installers are unsigned. If SmartScreen displays *"Windows protected your PC"*, verify the download before selecting **More info → Run anyway**.
 
 ### Verify Checksums (Optional)
+
+Download `SHA256SUMS.txt` into the folder with your installer. On macOS, run:
+
 ```sh
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
+On Windows, compare the output with the matching line in `SHA256SUMS.txt`:
+
+```powershell
+Get-FileHash .\Uya-0.1.0-windows-x64-setup.exe -Algorithm SHA256
 ```
 
 ## Build from Source

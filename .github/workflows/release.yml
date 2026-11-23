@@ -1,16 +1,25 @@
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (defaults to the selected ref)"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
+
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
 
 jobs:
   verify:
@@ -19,6 +28,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -31,14 +42,16 @@ jobs:
           node-version: 22
 
       - name: Verify release version
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || inputs.tag != ''
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           node <<'NODE'
           const { version } = require('./package.json');
           const desktop = require('./apps/desktop/package.json');
           const tauri = require('./apps/desktop/src-tauri/tauri.conf.json');
-          const tag = process.env.GITHUB_REF_NAME;
+          const tag = process.env.RELEASE_TAG;
           if (tag !== `v${version}` || desktop.version !== version || tauri.version !== version) {
             throw new Error(`Version mismatch: tag=${tag}, workspace=${version}, desktop=${desktop.version}, Tauri=${tauri.version}`);
           }
@@ -81,6 +94,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -169,6 +184,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": {
+      "cwd": "../../..",
+      "script": "bun --no-env-file run web:build && bun --no-env-file run apps/desktop/scripts/build-core.ts"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/uya-core"]
+  }
+}

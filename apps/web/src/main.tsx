@@ -1,0 +1,9 @@
+import { createRoot } from "react-dom/client";
+import "@mantine/core/styles.css";
+import "@mantine/spotlight/styles.css";
+import "./styles.css";
+import { App } from "./App";
+
+const root = document.getElementById("root");
+if (!root) throw new Error("Missing application root.");
+createRoot(root).render(<App />);

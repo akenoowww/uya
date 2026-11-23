@@ -1,0 +1,283 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag name to build (defaults to current ref; only tag pushes publish a GitHub Release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify before release
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run TypeScript, unit, smoke, and web build checks
+        run: bun run check
+
+      - name: Run Rust tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked
+
+  build-macos:
+    name: Build macOS (${{ matrix.label }})
+    needs: verify
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            label: Apple Silicon
+          - target: x86_64-apple-darwin
+            arch: x64
+            label: Intel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+          key: release-${{ matrix.target }}
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build Uya desktop bundle (.app & .dmg)
+        env:
+          CI: "true"
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --target ${{ matrix.target }} --bundles app,dmg
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          BUNDLE_DIR="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          OUT_DIR="dist-release-${{ matrix.arch }}"
+          mkdir -p "$OUT_DIR"
+
+          DMG_FILE=$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' | head -n 1)
+          if [ -z "$DMG_FILE" ]; then
+            echo "No .dmg bundle found in $BUNDLE_DIR/dmg" >&2
+            exit 1
+          fi
+          cp "$DMG_FILE" "$OUT_DIR/Uya-${VERSION}-macos-${{ matrix.arch }}.dmg"
+
+          APP_DIR="$BUNDLE_DIR/macos/Uya.app"
+          if [ ! -d "$APP_DIR" ]; then
+            echo "No Uya.app bundle found in $BUNDLE_DIR/macos" >&2
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$OUT_DIR/Uya-${VERSION}-macos-${{ matrix.arch }}.app.zip"
+          ls -lh "$OUT_DIR"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uya-macos-${{ matrix.arch }}
+          path: dist-release-${{ matrix.arch }}/*
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows (x64)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+          key: release-x86_64-pc-windows-msvc
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run Windows Rust tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked
+
+      - name: Build Uya Windows installers (.exe & .msi)
+        env:
+          CI: "true"
+          TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
+        run: bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --bundles nsis,msi
+
+      - name: Collect release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = node -p "require('./package.json').version"
+          $bundleDir = "apps/desktop/src-tauri/target/release/bundle"
+          $outDir = "dist-release-win-x64"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          $nsis = Get-ChildItem "$bundleDir/nsis" -Filter "*.exe" | Select-Object -First 1
+          if (-not $nsis) { throw "No NSIS .exe installer found in $bundleDir/nsis" }
+          Copy-Item $nsis.FullName "$outDir/Uya-$version-windows-x64-setup.exe"
+
+          $msi = Get-ChildItem "$bundleDir/msi" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) { throw "No MSI installer found in $bundleDir/msi" }
+          Copy-Item $msi.FullName "$outDir/Uya-$version-windows-x64.msi"
+
+          Get-ChildItem $outDir
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uya-windows-x64
+          path: dist-release-win-x64/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          {
+            echo "## Uya ${TAG}"
+            echo ""
+            if [ -f CHANGELOG.md ]; then
+              awk -v ver="$VERSION" '
+                $0 ~ "^## \\[" ver "\\]" { found=1; next }
+                found && /^## \[/ { exit }
+                found { print }
+              ' CHANGELOG.md
+            fi
+            echo ""
+            echo "### Downloads"
+            echo ""
+            echo "#### macOS (13+)"
+            echo "- **Apple Silicon (M1 / M2 / M3 / M4):** \`Uya-${VERSION}-macos-arm64.dmg\` (or \`.app.zip\`)"
+            echo "- **Intel Mac:** \`Uya-${VERSION}-macos-x64.dmg\` (or \`.app.zip\`)"
+            echo ""
+            echo "#### Windows (10 / 11, 64-bit)"
+            echo "- **Installer (Recommended):** \`Uya-${VERSION}-windows-x64-setup.exe\` (no admin rights required)"
+            echo "- **MSI Package:** \`Uya-${VERSION}-windows-x64.msi\`"
+            echo ""
+            echo "- **Checksums:** \`SHA256SUMS.txt\`"
+            echo ""
+            echo "### First Launch Notes (Unsigned Builds)"
+            echo ""
+            echo "- **macOS Gatekeeper:** After moving **Uya.app** to \`/Applications\`, run:"
+            echo ""
+            echo '```sh'
+            echo 'xattr -cr "/Applications/Uya.app"'
+            echo '```'
+            echo ""
+            echo "- **Windows SmartScreen:** If Windows Defender SmartScreen displays *Windows protected your PC*, click **More info → Run anyway**."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "Uya ${TAG}" \
+              --notes-file release-notes.md
+          fi

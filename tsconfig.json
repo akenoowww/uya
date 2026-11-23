@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/core" },
+    { "path": "./apps/desktop" },
+    { "path": "./apps/web" },
+    { "path": "./apps/web/tsconfig.tooling.json" }
+  ]
+}

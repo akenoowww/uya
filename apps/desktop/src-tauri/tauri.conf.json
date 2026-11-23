@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Uya",
+  "version": "0.1.0",
+  "mainBinaryName": "uya",
+  "identifier": "io.github.akenoowww.uya",
+  "build": {
+    "beforeDevCommand": { "cwd": "../../..", "script": "bun --no-env-file run web:dev" },
+    "beforeBuildCommand": { "cwd": "../../..", "script": "bun --no-env-file run web:build" },
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Uya",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 820,
+        "minHeight": 560,
+        "create": false
+      }
+    ],
+    "security": {
+      "capabilities": ["main"],
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "img-src": "'self' data: blob:",
+        "worker-src": "'self' blob:",
+        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*",
+        "base-uri": "'self'",
+        "object-src": "'none'",
+        "frame-src": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "img-src": "'self' data: blob:",
+        "worker-src": "'self' blob:",
+        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*",
+        "base-uri": "'self'",
+        "object-src": "'none'",
+        "frame-src": "'none'"
+      }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "homepage": "https://github.com/akenoowww/uya",
+    "category": "DeveloperTool",
+    "shortDescription": "Local-first multi-agent AI workbench for macOS and Windows",
+    "longDescription": "Uya is a local desktop workbench for macOS and Windows where you can open a project, run one prompt across multiple CLI agents or local models, compare responses side-by-side in splits, and launch interactive terminals.",
+    "copyright": "Copyright © 2026 Uya Contributors",
+    "license": "Apache-2.0",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "dmg": {
+        "windowSize": { "width": 600, "height": 400 },
+        "appPosition": { "x": 165, "y": 190 },
+        "applicationFolderPosition": { "x": 435, "y": 190 }
+      }
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

@@ -1,0 +1,229 @@
+.tool-pane {
+  width: 100%;
+  overflow: hidden;
+  background: var(--panel);
+  color: var(--text);
+  font-size: var(--font-label);
+}
+
+.tool-heading {
+  display: flex;
+  align-items: center;
+  flex: 0 0 39px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tool-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-label);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.tool-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.project-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.project-label svg { color: var(--accent); }
+
+.project-label span,
+.file-name span,
+.editor-filename span,
+.prompt-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 27px;
+  margin: 0 5px;
+  padding-right: 6px;
+  border-radius: 4px;
+}
+
+.file-row:hover,
+.file-row-active {
+  background: var(--surface);
+}
+
+.file-row-active {
+  color: var(--accent);
+}
+
+.file-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+}
+
+.file-name svg { flex: none; color: var(--muted); }
+.file-name .file-code { color: #92adc9; }
+.file-name .file-meta { color: #c4a574; }
+.file-chevron-gap { flex: 0 0 12px; }
+
+.file-context {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.editor-pane { background: var(--background); }
+.editor-pane .tool-heading { background: var(--panel); }
+
+.editor-filename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.editor-filename svg { flex: none; color: #92adc9; }
+
+.editor-dirty {
+  background: var(--accent);
+  border-radius: 100%;
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+}
+
+.editor-empty,
+.prompt-empty {
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  padding: 32px 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.editor-empty p,
+.prompt-empty p { margin: 0; }
+
+.editor-empty {
+  flex: 1;
+  min-height: 0;
+  align-content: center;
+  overflow: auto;
+}
+
+.editor-note,
+.editor-inline-error {
+  margin: 0;
+  padding: 9px 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.editor-note { color: var(--muted); }
+
+.editor-inline-error,
+.editor-notice { color: var(--danger); }
+
+.editor-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 9px;
+}
+
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  visibility: hidden;
+}
+
+.editor-host-ready { visibility: visible; }
+.prompt-scroll { padding: 12px; }
+.prompt-scroll .editor-note, .prompt-scroll .editor-inline-error { padding-inline: 0; }
+
+.prompt-form {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.prompt-form textarea { resize: vertical; }
+.prompt-source { font-family: var(--mono); line-height: 1.5; }
+
+.prompt-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--font-caption);
+}
+
+.prompt-preview {
+  box-sizing: border-box;
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--background);
+  font: var(--font-caption)/1.55 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.prompt-form > .control { justify-self: start; }
+.prompt-buttons { display: flex; gap: 6px; flex-wrap: wrap; }

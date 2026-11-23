@@ -85,10 +85,12 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
+            macho_arch: arm64
             runner: macos-15
             label: Apple Silicon
           - target: x86_64-apple-darwin
             arch: x64
+            macho_arch: x86_64
             runner: macos-15-intel
             label: Intel
     steps:
@@ -164,8 +166,8 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict "$APP_DIR"
-          lipo -verify_arch "$(uname -m)" "$APP_DIR/Contents/MacOS/uya"
-          lipo -verify_arch "$(uname -m)" "$APP_DIR/Contents/MacOS/uya-core"
+          lipo "$APP_DIR/Contents/MacOS/uya" -verify_arch "${{ matrix.macho_arch }}"
+          lipo "$APP_DIR/Contents/MacOS/uya-core" -verify_arch "${{ matrix.macho_arch }}"
           hdiutil verify "$DMG_FILE"
           ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$OUT_DIR/Uya-${VERSION}-macos-${{ matrix.arch }}.app.zip"
           ls -lh "$OUT_DIR"

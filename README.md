@@ -27,12 +27,14 @@
 
 Uya lets you open a local project on **macOS** or **Windows 10/11**, send a single prompt to one or multiple CLI agents and local models in parallel splits, compare their answers side-by-side, inspect files in a built-in Monaco editor, and launch native interactive terminals without leaving the workbench.
 
-- **Parallel Splits & Broadcast**: Compare multiple agents or local models simultaneously, with independent conversation threads per split and **Run History**.
+- **Parallel Splits, Broadcast & Cross-Model Review**: Compare multiple agents or local models simultaneously with per-split **Model Effort** controls (`minimal`–`max`), then cross-review or synthesize completed broadcast responses with an arbiter model.
+- **Smart Context & Project Rules**: Attach files, Git diffs, and terminal output via `@file`, `@git-diff`, `@git-staged`, and `@terminal` with a live context budget meter, plus automatic discovery of `AGENTS.md` / `CLAUDE.md` / `.uya/rules.md`.
 - **Rule-Based & Fallback Routing**: Route prompts automatically by tag, context file extension, or minimum context size, or define ordered fallback chains.
-- **Built-in Project Explorer & Monaco Editor**: Open files in tabs, attach selected files and active editor selections as prompt context, and get unsaved-draft warnings when switching projects.
-- **Native Interactive Terminals**: Run interactive agent TUIs or a shell right inside any split via native PTYs (macOS PTY / Windows ConPTY).
-- **Prompt Library**: Version project prompts in Git (`<project>/.ai/prompts/`) and keep personal prompts globally (`~/.uya/prompts/`) with `{{variable}}` substitution.
-- **Local-First Security**: Loopback-only Bun sidecar with per-session bearer authentication, editor access confined to the selected workspace, and sandboxed Structured runs for Custom CLI on macOS.
+- **Built-in Explorer, Git Diff & Monaco Editor**: Quick Open (`⌘P` / `Ctrl+P`), confined file/folder CRUD, read-only Git sidebar, side-by-side/inline Monaco **Diff / Apply** from AI code blocks, syntax-highlighted Markdown, and clickable `file:line` references.
+- **History 2.0 & Usage Insights**: SQLite FTS5 full-text search across prompts and replies, thread Resume, Fork, Markdown export, Delete, and local TTFT / token / effort usage metrics.
+- **Native Interactive Terminals**: Run interactive agent TUIs or a shell right inside any split via auto-starting native PTYs (macOS PTY / Windows ConPTY).
+- **Prompt Library**: Version project prompts in Git (`<project>/.ai/prompts/`) and keep personal prompts globally (`~/.uya/prompts/`) with `{{variable}}` substitution and optional `effort` frontmatter.
+- **Local-First Security**: Loopback-only Bun sidecar with per-session bearer authentication, workspace confinement, picker-approved Recent Projects, hardened read-only Git inspection, and sandboxed Structured runs for Custom CLI on macOS.
 
 ## Download & Install
 
@@ -130,6 +132,7 @@ Store project templates in `<project>/.ai/prompts/` (easy to track in Git) and p
 ---
 title: Code Review
 providerId: codex
+effort: high
 mode: manual
 variables:
   language: TypeScript
@@ -138,7 +141,7 @@ variables:
 Review this {{language}} code. Focus: {{focus}}.
 ```
 
-`providerId` and `mode` are optional (`manual`, `rule`, or `fallback`). Leaving a variable empty in YAML marks it as having no default value.
+`providerId`, `effort` (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and `mode` (`manual`, `rule`, or `fallback`) are optional. Leaving a variable empty in YAML marks it as having no default value.
 
 ## Architecture & Security Boundaries
 

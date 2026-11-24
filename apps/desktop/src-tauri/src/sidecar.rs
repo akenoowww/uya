@@ -206,7 +206,7 @@ fn lock_data_directory(directory: &Path) -> Result<File, String> {
 }
 
 fn sidecar_command() -> Result<Command, String> {
-    if !cfg!(feature = "custom-protocol") {
+    if tauri::is_dev() {
         let entry =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../packages/core/src/index.ts");
         let mut command = Command::new("bun");

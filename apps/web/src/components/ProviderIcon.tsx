@@ -1,61 +1,55 @@
-import { TerminalWindow } from "@phosphor-icons/react";
-import uyaMarkUrl from "../assets/uya-mark.png";
-import codexIconUrl from "../assets/icons/provider-codex.png";
 import claudeIconUrl from "../assets/icons/provider-claude.png";
+import codexIconUrl from "../assets/icons/provider-codex.png";
+import customIconUrl from "../assets/icons/provider-custom.png";
 import geminiIconUrl from "../assets/icons/provider-gemini.png";
-import localIconUrl from "../assets/icons/provider-local.png";
+import kimiIconUrl from "../assets/icons/provider-kimi.png";
+import llamaCppIconUrl from "../assets/icons/provider-llamacpp.png";
+import lmStudioIconUrl from "../assets/icons/provider-lmstudio.png";
+import mlxIconUrl from "../assets/icons/provider-mlx.png";
+import ollamaIconUrl from "../assets/icons/provider-ollama.png";
+import openCodeIconUrl from "../assets/icons/provider-opencode.png";
+import qwenIconUrl from "../assets/icons/provider-qwen.png";
+import uyaMarkUrl from "../assets/uya-mark.png";
 
-const GENERATED_PROVIDER_ICONS: Readonly<Record<string, string>> = {
-  codex: codexIconUrl,
-  claude: claudeIconUrl,
-  gemini: geminiIconUrl,
-  ollama: localIconUrl,
-  llamacpp: localIconUrl,
-  mlx: localIconUrl,
-  lmstudio: localIconUrl,
-};
+const PROVIDER_ICONS: ReadonlyMap<string, string> = new Map([
+  ["claude", claudeIconUrl],
+  ["codex", codexIconUrl],
+  ["custom", customIconUrl],
+  ["gemini", geminiIconUrl],
+  ["kimi", kimiIconUrl],
+  ["llamacpp", llamaCppIconUrl],
+  ["lmstudio", lmStudioIconUrl],
+  ["mlx", mlxIconUrl],
+  ["ollama", ollamaIconUrl],
+  ["opencode", openCodeIconUrl],
+  ["qwen", qwenIconUrl],
+]);
 
-interface ProviderStyle {
-  accent: string;
-  surface: string;
-  border: string;
-}
-
-const PROVIDER_STYLES: Readonly<Record<string, ProviderStyle>> = {
-  qwen: { accent: "#b7a3ff", surface: "#211d32", border: "#3a3258" },
-  opencode: { accent: "#82d4e8", surface: "#17242a", border: "#28414b" },
-  kimi: { accent: "#93c5fd", surface: "#182334", border: "#2c3f5e" },
-};
-
-const DEFAULT_STYLE: ProviderStyle = { accent: "#c4b6ff", surface: "#242131", border: "#3c3652" };
-
-function FallbackGlyph({ id, size }: { id: string; size: number }) {
-  switch (id) {
-    case "qwen":
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M12 3.4L19.4 7.7V16.3L12 20.6L4.6 16.3V7.7L12 3.4Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-          <path d="M12 8.2L15.4 12L12 15.8L8.6 12L12 8.2Z" fill="currentColor" />
-          <path d="M14.5 14.5L18.5 18.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-        </svg>
-      );
-    case "opencode":
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <rect x="4" y="4" width="16" height="16" rx="3.5" stroke="currentColor" strokeWidth="1.85" />
-          <rect x="8.5" y="8.5" width="7" height="7" rx="1.2" fill="currentColor" />
-        </svg>
-      );
-    case "kimi":
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M7 4.5V19.5M7 12L16.5 4.8M10.5 9.5L17.5 19.5" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      );
-    default:
-      return <TerminalWindow size={size} weight="duotone" aria-hidden="true" />;
+const PROVIDER_ICON_STYLES = `
+  .provider-icon {
+    display: inline-block;
+    flex: none;
+    object-fit: contain;
+    vertical-align: middle;
   }
-}
+
+  .provider-icon--framed {
+    box-sizing: content-box;
+    min-width: var(--provider-emblem-size, 0px);
+    min-height: var(--provider-emblem-size, 0px);
+    padding: var(--provider-emblem-padding, 3px);
+    border: 1px solid var(--border, #2f323d);
+    border-radius: 25%;
+    background: var(--surface, #21232b);
+  }
+
+  .empty-emblem:has(> .provider-icon--framed) {
+    /* Size the RunPane emblem in layout instead of scaling its raster image. */
+    transform: none;
+    --provider-emblem-size: 36px;
+    --provider-emblem-padding: 5px;
+  }
+`;
 
 export function ProviderIcon({
   providerId,
@@ -66,43 +60,21 @@ export function ProviderIcon({
   size?: number;
   framed?: boolean;
 }) {
-  const id = providerId ?? "";
-  const generatedSrc = GENERATED_PROVIDER_ICONS[id];
-  if (generatedSrc) {
-    const dim = framed ? Math.max(22, size + 8) : Math.max(15, size + 3);
-    return (
+  const src = PROVIDER_ICONS.get(providerId ?? "custom") ?? customIconUrl;
+
+  return (
+    <>
+      <style href="uya-provider-icon" precedence="default">{PROVIDER_ICON_STYLES}</style>
       <img
-        src={generatedSrc}
+        src={src}
         alt=""
-        width={dim}
-        height={dim}
-        className="provider-generated-img"
+        width={size}
+        height={size}
+        className={framed ? "provider-icon provider-icon--framed" : "provider-icon"}
         draggable={false}
         aria-hidden="true"
       />
-    );
-  }
-
-  const style = PROVIDER_STYLES[id] ?? DEFAULT_STYLE;
-  if (!framed) {
-    return (
-      <span className="provider-glyph-inline" style={{ color: style.accent }}>
-        <FallbackGlyph id={id} size={size} />
-      </span>
-    );
-  }
-  return (
-    <span
-      className="provider-badge-icon"
-      style={{
-        color: style.accent,
-        background: style.surface,
-        borderColor: style.border,
-      }}
-      aria-hidden="true"
-    >
-      <FallbackGlyph id={id} size={size} />
-    </span>
+    </>
   );
 }
 

@@ -3,6 +3,7 @@ import type { ServerWebSocket } from "bun";
 import type { RpcMethod, RpcParams, RpcResult, RunEvent } from "@ide/protocol";
 import { CONVERSATION_HISTORY_LIMIT } from "./conversation";
 import type { CliModelDiscoverer } from "./cli-models";
+import { gitDiff, gitStatus } from "./git";
 import { History } from "./history";
 import type { LocalRuntimeId } from "./local-runtimes";
 import { Providers } from "./providers";
@@ -29,6 +30,12 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
     if (requested !== (workspace.path ?? null)) {
       throw new RpcError(-32009, "The workspace changed. Reopen the project and try again.");
     }
+  }
+  function gitRoot(requested: string | undefined) {
+    const root = workspace.path;
+    if (root === undefined) throw new RpcError(-32004, "Open a project folder first.");
+    if (requested !== undefined) checkWorkspace(requested);
+    return root;
   }
   return {
     "providers.list": ({ refresh }) => providers.list(refresh),
@@ -65,6 +72,10 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.list(params);
     },
+    "workspace.files": ({ workspacePath: requestedPath, ...params }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.files(params);
+    },
     "workspace.read": ({ workspacePath: requestedPath, ...params }) => {
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.read(params);
@@ -73,6 +84,25 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.write(params);
     },
+    "workspace.create": ({ workspacePath: requestedPath, ...params }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.create(params);
+    },
+    "workspace.rename": ({ workspacePath: requestedPath, ...params }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.rename(params);
+    },
+    "workspace.remove": async ({ workspacePath: requestedPath, ...params }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      await workspace.remove(params);
+      return null;
+    },
+    "workspace.projectRules": ({ workspacePath: requestedPath }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.projectRules();
+    },
+    "git.status": ({ workspacePath }) => gitStatus(gitRoot(workspacePath)),
+    "git.diff": ({ workspacePath, ...params }) => gitDiff(gitRoot(workspacePath), params),
     "prompts.list": () => workspace.listPrompts(),
     "prompts.read": (params) => workspace.readPrompt(params),
     "prompts.write": (params) => workspace.writePrompt(params),

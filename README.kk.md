@@ -39,18 +39,18 @@ Uya арқылы **macOS** немесе **Windows 10/11** жүйесінде ж�
 Дайын орнатқыштар [GitHub Releases](https://github.com/akenoowww/uya/releases/latest) бетінде жарияланады:
 
 ### macOS (13+)
-1. [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0) бетінен Mac құрылғыңызға сәйкес `.dmg` (немесе `.app.zip`) файлын жүктеп алыңыз:
-   - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-0.1.0-macos-arm64.dmg`
-   - **Intel Mac**: `Uya-0.1.0-macos-x64.dmg`
+1. [Соңғы шығарылым](https://github.com/akenoowww/uya/releases/latest) бетінен Mac құрылғыңызға сәйкес `.dmg` (немесе `.app.zip`) файлын жүктеп алыңыз:
+   - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-<version>-macos-arm64.dmg`
+   - **Intel Mac**: `Uya-<version>-macos-x64.dmg`
 2. `.dmg` файлын ашып, **Uya** қолданбасын **Applications** папкасына сүйреп апарыңыз.
 3. macOS Gatekeeper қолданбаны алғаш ашқанда бұғаттаса, жүктелген файлды тексеріп, [Apple ұсынған Open Anyway нұсқаулығын](https://support.apple.com/en-us/102445) орындаңыз.
 
 ### Windows (10 / 11, 64-bit)
-1. [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0) бетінен орнатқышты жүктеп алыңыз:
-   - **Ұсынылатын орнатқыш (әкімші құқығынсыз)**: `Uya-0.1.0-windows-x64-setup.exe`
-   - **MSI бумасы**: `Uya-0.1.0-windows-x64.msi`
+1. [Соңғы шығарылым](https://github.com/akenoowww/uya/releases/latest) бетінен орнатқышты жүктеп алыңыз:
+   - **Ұсынылатын орнатқыш (әкімші құқығынсыз)**: `Uya-<version>-windows-x64-setup.exe`
+   - **MSI бумасы**: `Uya-<version>-windows-x64.msi`
 2. Орнатқышты іске қосыңыз (Windows 11-де WebView2 алдын ала орнатылған, ал Windows 10-да қажет болса автоматты жүктеледі).
-3. Орнатқыштарға цифрлық қолтаңба қойылмаған. SmartScreen ескертуі шықса, алдымен жүктелген файлды тексеріңіз, содан кейін **More info → Run anyway** түймесін басыңыз.
+3. SmartScreen ескертуі шықса, алдымен жүктелген файлды тексеріңіз, содан кейін **More info → Run anyway** түймесін басыңыз.
 
 ### Тұтастықты тексеру (міндетті емес)
 Орнатқыш тұрған қалтаға `SHA256SUMS.txt` файлын жүктеп алыңыз. macOS жүйесінде:
@@ -62,8 +62,12 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 Windows жүйесінде нәтижені `SHA256SUMS.txt` файлындағы сәйкес жолмен салыстырыңыз:
 
 ```powershell
-Get-FileHash .\Uya-0.1.0-windows-x64-setup.exe -Algorithm SHA256
+Get-ChildItem Uya-*-windows-x64-setup.exe | Get-FileHash -Algorithm SHA256
 ```
+
+### Қолданбаны жаңарту
+
+GitHub Releases бетінен орнатылған қолтаңбалы Uya жинақтары жаңартуларды фондық режимде тексереді. Жаңарту дайын болғанда **Restart to Update** түймесін басыңыз. Қолмен тексеру үшін командалар палитрасынан **Check for Updates** пәрменін таңдаңыз.
 
 ## Бастапқы кодтан жинау
 

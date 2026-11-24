@@ -60,14 +60,14 @@ svg { flex-shrink: 0; }
 
 .titlebar {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(240px, 1.8fr) minmax(120px, 1fr);
+  grid-template-columns: minmax(140px, 1fr) minmax(240px, 1.8fr) minmax(max-content, 1fr);
   align-items: center;
   gap: 12px;
   padding-inline: 14px;
   border-bottom: 1px solid var(--line);
   background: var(--chrome);
 }
-.titlebar-right { display: flex; justify-content: flex-end; }
+.titlebar-right { display: flex; justify-content: flex-end; gap: 8px; }
 .product-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .product-name h1 { font-size: 13px; font-weight: 650; margin: 0; letter-spacing: -.015em; white-space: nowrap; }
 .brand-mark {
@@ -518,6 +518,17 @@ svg { flex-shrink: 0; }
 .runtime-status, .footer-project { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
 .footer-project { overflow: hidden; text-overflow: ellipsis; max-width: 34%; }
 .status-active { color: var(--accent); font-weight: 550; }
+
+.app-update-dialog {
+  width: min(400px, calc(100% - 32px));
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--chrome);
+  color: var(--text);
+}
+.app-update-dialog:modal { overscroll-behavior: contain; }
+.app-update-dialog::backdrop { background: #0009; overflow: hidden; overscroll-behavior: contain; }
 
 /* Settings Rows & Rules Grid */
 .provider-row {

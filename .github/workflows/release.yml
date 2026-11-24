@@ -25,6 +25,8 @@ jobs:
   verify:
     name: Verify before release
     runs-on: macos-15
+    outputs:
+      updater-config: ${{ steps.updater.outputs.config }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -48,13 +50,57 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           node <<'NODE'
-          const { version } = require('./package.json');
-          const desktop = require('./apps/desktop/package.json');
-          const tauri = require('./apps/desktop/src-tauri/tauri.conf.json');
-          const tag = process.env.RELEASE_TAG;
-          if (tag !== `v${version}` || desktop.version !== version || tauri.version !== version) {
-            throw new Error(`Version mismatch: tag=${tag}, workspace=${version}, desktop=${desktop.version}, Tauri=${tauri.version}`);
+          const { readFileSync } = require('node:fs');
+          const manifests = [
+            'package.json',
+            'apps/desktop/package.json',
+            'apps/web/package.json',
+            'packages/core/package.json',
+            'packages/protocol/package.json',
+            'apps/desktop/src-tauri/tauri.conf.json',
+          ];
+          const expected = process.env.RELEASE_TAG.slice(1);
+          if (process.env.RELEASE_TAG !== 'v' + require('./package.json').version) {
+            throw new Error('Tag must match the version in package.json.');
           }
+          for (const manifest of manifests) {
+            if (require('./' + manifest).version !== expected) {
+              throw new Error(manifest + ' must be set to ' + expected + '.');
+            }
+          }
+          const cargo = readFileSync('apps/desktop/src-tauri/Cargo.toml', 'utf8');
+          if (cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1] !== expected) {
+            throw new Error('Cargo.toml must be set to ' + expected + '.');
+          }
+          const heading = '## [' + expected + '] - ';
+          const changelog = readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/);
+          if (!changelog.some((line) => line.startsWith(heading) && /^\d{4}-\d{2}-\d{2}$/.test(line.slice(heading.length)))) {
+            throw new Error('CHANGELOG.md must include a dated release entry for ' + expected + '.');
+          }
+          NODE
+
+      - name: Prepare signed updater configuration
+        id: updater
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node <<'NODE'
+          const { appendFileSync } = require('node:fs');
+          const pubkey = process.env.TAURI_UPDATER_PUBLIC_KEY?.trim() ?? '';
+          if (!/^[A-Za-z0-9+/]+={0,2}$/.test(pubkey) || pubkey.length % 4 !== 0) {
+            throw new Error('Set the TAURI_UPDATER_PUBLIC_KEY repository variable to the contents of the Tauri .pub file.');
+          }
+          const config = {
+            bundle: { createUpdaterArtifacts: true },
+            plugins: { updater: {
+              pubkey,
+              endpoints: [`https://github.com/${process.env.GITHUB_REPOSITORY}/releases/latest/download/latest.json`],
+              requireSignedVersion: true,
+            } },
+          };
+          appendFileSync(process.env.GITHUB_OUTPUT, `config=${JSON.stringify(config)}\n`);
           NODE
 
       - name: Setup Rust toolchain
@@ -128,6 +174,9 @@ jobs:
         env:
           CI: "true"
           TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+          UPDATER_CONFIG: ${{ needs.verify.outputs.updater-config }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name == 'push' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name == 'push' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -135,6 +184,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
           # GitHub sets missing secrets to empty strings, which Tauri treats as supplied.
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [[ -z "${!name}" ]]; then unset "$name"; fi
@@ -142,7 +192,15 @@ jobs:
           if [[ -z "${APPLE_CERTIFICATE:-}" && -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
             export APPLE_SIGNING_IDENTITY=-
           fi
-          bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --target ${{ matrix.target }} --bundles app,dmg
+          config_args=(--config src-tauri/tauri.bundle.conf.json)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            : "${UPDATER_CONFIG:?Missing updater configuration}"
+            : "${TAURI_SIGNING_PRIVATE_KEY:?Set the TAURI_SIGNING_PRIVATE_KEY repository secret}"
+            updater_config="$RUNNER_TEMP/tauri.updater.conf.json"
+            printf '%s\n' "$UPDATER_CONFIG" > "$updater_config"
+            config_args+=(--config "$updater_config")
+          fi
+          bun --no-env-file run --cwd apps/desktop tauri build "${config_args[@]}" --target ${{ matrix.target }} --bundles app,dmg
 
       - name: Collect release assets
         shell: bash
@@ -170,6 +228,12 @@ jobs:
           lipo "$APP_DIR/Contents/MacOS/uya-core" -verify_arch "${{ matrix.macho_arch }}"
           hdiutil verify "$DMG_FILE"
           ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$OUT_DIR/Uya-${VERSION}-macos-${{ matrix.arch }}.app.zip"
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            ARCHIVE="${APP_DIR}.tar.gz"
+            UPDATE_NAME="Uya-${VERSION}-macos-${{ matrix.arch }}.app.tar.gz"
+            cp "$ARCHIVE" "$OUT_DIR/$UPDATE_NAME"
+            cp "$ARCHIVE.sig" "$OUT_DIR/$UPDATE_NAME.sig"
+          fi
           ls -lh "$OUT_DIR"
 
       - name: Upload build artifacts
@@ -216,10 +280,25 @@ jobs:
         run: cargo test --locked
 
       - name: Build Uya Windows installers (.exe & .msi)
+        shell: pwsh
         env:
           CI: "true"
           TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
-        run: bun run --cwd apps/desktop tauri build --config src-tauri/tauri.bundle.conf.json --bundles nsis,msi
+          UPDATER_CONFIG: ${{ needs.verify.outputs.updater-config }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name == 'push' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name == 'push' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $configArgs = @("--config", "src-tauri/tauri.bundle.conf.json")
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            if (-not $env:UPDATER_CONFIG) { throw "Missing updater configuration" }
+            if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "Set the TAURI_SIGNING_PRIVATE_KEY repository secret" }
+            $updaterConfig = Join-Path $env:RUNNER_TEMP "tauri.updater.conf.json"
+            Set-Content -LiteralPath $updaterConfig -Value $env:UPDATER_CONFIG -Encoding utf8NoBOM
+            $configArgs += @("--config", $updaterConfig)
+          }
+          bun --no-env-file run --cwd apps/desktop tauri build @configArgs --bundles nsis,msi
+          exit $LASTEXITCODE
 
       - name: Collect release assets
         shell: pwsh
@@ -232,11 +311,18 @@ jobs:
 
           $nsis = Get-ChildItem "$bundleDir/nsis" -Filter "*.exe" | Select-Object -First 1
           if (-not $nsis) { throw "No NSIS .exe installer found in $bundleDir/nsis" }
-          Copy-Item $nsis.FullName "$outDir/Uya-$version-windows-x64-setup.exe"
+          $nsisAsset = "$outDir/Uya-$version-windows-x64-setup.exe"
+          Copy-Item -LiteralPath $nsis.FullName -Destination $nsisAsset
 
           $msi = Get-ChildItem "$bundleDir/msi" -Filter "*.msi" | Select-Object -First 1
           if (-not $msi) { throw "No MSI installer found in $bundleDir/msi" }
-          Copy-Item $msi.FullName "$outDir/Uya-$version-windows-x64.msi"
+          $msiAsset = "$outDir/Uya-$version-windows-x64.msi"
+          Copy-Item -LiteralPath $msi.FullName -Destination $msiAsset
+
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            Copy-Item -LiteralPath "$($nsis.FullName).sig" -Destination "$nsisAsset.sig"
+            Copy-Item -LiteralPath "$($msi.FullName).sig" -Destination "$msiAsset.sig"
+          }
 
           Get-ChildItem $outDir
 
@@ -263,6 +349,16 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Install updater signature verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+
+      - name: Verify updater signatures and generate manifest
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: node .github/scripts/prepare-updater-release.mjs release-assets
 
       - name: Verify release assets and generate SHA-256 checksums
         shell: bash
@@ -320,7 +416,7 @@ jobs:
             echo "### First Launch"
             echo ""
             echo "- **macOS:** If Gatekeeper blocks the app, follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445)."
-            echo "- **Windows:** The installers are unsigned. If SmartScreen displays *Windows protected your PC*, check the download against \`SHA256SUMS.txt\` before selecting **More info → Run anyway**."
+            echo "- **Windows:** If SmartScreen displays *Windows protected your PC*, check the download against \`SHA256SUMS.txt\` before selecting **More info → Run anyway**."
           } > release-notes.md
           cat release-notes.md
 
@@ -331,7 +427,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          release_args=()
+          if [[ "${VERSION%%+*}" == *-* ]]; then
+            release_args+=(--prerelease --latest=false)
+          fi
           gh release create "$TAG" release-assets/* \
             --verify-tag \
             --title "Uya ${TAG}" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            "${release_args[@]}"

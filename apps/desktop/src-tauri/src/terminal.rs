@@ -71,33 +71,58 @@ impl Session {
 #[derive(Default)]
 pub struct Terminals {
     next_id: AtomicU64,
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    state: Mutex<TerminalState>,
+}
+
+#[derive(Default)]
+struct TerminalState {
+    sessions: HashMap<String, Arc<Session>>,
+    restarting: bool,
 }
 
 impl Terminals {
     fn session(&self, id: &str) -> Result<Arc<Session>, String> {
-        self.sessions
+        self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .sessions
             .get(id)
             .cloned()
             .ok_or_else(|| "This terminal session has ended.".to_owned())
     }
 
     fn remove(&self, id: &str) -> Option<Arc<Session>> {
-        self.sessions
+        self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .sessions
             .remove(id)
     }
 
+    #[cfg(any(target_os = "macos", windows))]
+    pub fn block_for_update(&self, allow_terminal_shutdown: bool) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !allow_terminal_shutdown && !state.sessions.is_empty() {
+            return false;
+        }
+        state.restarting = true;
+        true
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    pub fn resume_after_update_failure(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .restarting = false;
+    }
+
     pub fn shutdown(&self) {
-        let sessions = std::mem::take(
-            &mut *self
-                .sessions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
+        let sessions = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.restarting = true;
+            std::mem::take(&mut state.sessions)
+        };
         for session in sessions.values() {
             session.terminate();
         }
@@ -131,6 +156,10 @@ impl Terminals {
         command.env_remove("IDE_SESSION_TOKEN");
         command.env_remove("IDE_MANAGED_SIDECAR");
 
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.restarting {
+            return Err("Wait for Uya to finish restarting before opening a terminal.".into());
+        }
         let pair = native_pty_system()
             .openpty(size)
             .map_err(|_| "Could not allocate a native terminal.")?;
@@ -159,10 +188,8 @@ impl Terminals {
             closing: AtomicBool::new(false),
         });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
-        self.sessions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(id.clone(), session.clone());
+        state.sessions.insert(id.clone(), session.clone());
+        drop(state);
 
         let terminals = Arc::clone(self);
         let finished_id = id.clone();
@@ -390,11 +417,14 @@ pub fn pty_resize(
 
 #[tauri::command]
 pub async fn pty_close(terminals: State<'_, Arc<Terminals>>, id: String) -> Result<(), String> {
-    let session = terminals.remove(&id);
-    if let Some(session) = session {
-        tauri::async_runtime::spawn_blocking(move || session.terminate())
-            .await
-            .map_err(|_| "Could not close the terminal.")?;
+    if let Ok(session) = terminals.session(&id) {
+        let terminals = Arc::clone(&terminals);
+        tauri::async_runtime::spawn_blocking(move || {
+            session.terminate();
+            terminals.remove(&id);
+        })
+        .await
+        .map_err(|_| "Could not close the terminal.")?;
     }
     Ok(())
 }
@@ -421,6 +451,34 @@ mod tests {
         assert!(resolve_program("./tool", None).is_none());
         assert!(resolve_program("sub\\tool", None).is_none());
         assert!(resolve_program("..", None).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn update_requires_consent_for_open_terminals_and_blocks_new_sessions() {
+        let terminals = Arc::new(Terminals::default());
+        let open = || {
+            terminals.open(
+                std::env::temp_dir(),
+                Some("/bin/sh".into()),
+                vec!["-c".into(), "read line".into()],
+                None,
+                terminal_size(80, 24).unwrap(),
+                Channel::new(|_| Ok(())),
+            )
+        };
+        let id = open().unwrap();
+
+        assert!(!terminals.block_for_update(false));
+        assert!(terminals.session(&id).is_ok());
+        assert!(terminals.block_for_update(true));
+        assert!(open().is_err());
+
+        terminals.shutdown();
+        assert!(terminals.session(&id).is_err());
+        terminals.resume_after_update_failure();
+        assert!(open().is_ok());
+        terminals.shutdown();
     }
 
     #[cfg(unix)]

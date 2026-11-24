@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { MantineProvider } from "@mantine/core";
+import { AppUpdateDialog, useAppUpdate } from "./AppUpdate";
 import { CommandPalette, openCommandPalette, toggleCommandPalette } from "./components/CommandPalette";
 import { Composer } from "./Composer";
 import { useProtectEditorDrafts } from "./editorDrafts";
@@ -13,6 +14,7 @@ import { WorkbenchContext } from "./workbenchContext";
 
 export function App() {
   const [workbench] = useState(createWorkbench);
+  const update = useAppUpdate(workbench.store, workbench.retryConnection);
   const shortcutControls = useMemo(() => ({
     togglePalette: toggleCommandPalette,
     openShortcuts: () => workbench.openShortcuts(),
@@ -26,7 +28,10 @@ export function App() {
       <WorkbenchContext.Provider value={workbench}>
         <WorkbenchConnection />
         <div className="workspace-shell">
-          <WorkbenchTitlebar onOpenPalette={openCommandPalette} />
+          <WorkbenchTitlebar
+            onOpenPalette={openCommandPalette}
+            onRestartToUpdate={update.pendingVersion ? () => void update.restart() : undefined}
+          />
           <div className="workspace-body">
             <ActivityRail />
             <WorkbenchSidebar />
@@ -36,9 +41,10 @@ export function App() {
               <Composer />
             </main>
           </div>
-          <WorkbenchStatus onOpenPalette={openCommandPalette} />
+          <WorkbenchStatus onOpenPalette={openCommandPalette} version={update.version} />
           <WorkbenchDialogs />
-          <CommandPalette />
+          <CommandPalette onCheckForUpdates={update.enabled ? update.checkForUpdates : undefined} />
+          <AppUpdateDialog update={update} />
         </div>
       </WorkbenchContext.Provider>
     </MantineProvider>

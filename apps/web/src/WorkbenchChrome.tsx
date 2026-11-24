@@ -14,7 +14,10 @@ import { formatShortcut } from "./shortcuts";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
 import { shortModelName, unavailable } from "./workbenchStore";
 
-export function WorkbenchTitlebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
+  onOpenPalette: () => void;
+  onRestartToUpdate?: () => void;
+}) {
   const { pickProject, openProviders } = useWorkbench();
   const { project, blocked, providerCount } = useWorkbenchState(useShallow((state) => ({
     project: state.workspace?.name ?? "Open project",
@@ -55,6 +58,9 @@ export function WorkbenchTitlebar({ onOpenPalette }: { onOpenPalette: () => void
         </HintTooltip>
       </div>
       <div className="titlebar-right">
+        {onRestartToUpdate && (
+          <Button color="iris" size="xs" onClick={onRestartToUpdate}>Restart to Update</Button>
+        )}
         <HintTooltip label="Manage providers & models" shortcut={formatShortcut("open-providers")}>
           <Button
             variant="default"
@@ -266,7 +272,7 @@ export function WorkbenchToolbar() {
   );
 }
 
-export function WorkbenchStatus({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function WorkbenchStatus({ onOpenPalette, version }: { onOpenPalette: () => void; version?: string }) {
   const { openShortcuts } = useWorkbench();
   const { connected, offline, project, busyRuns } = useWorkbenchState(useShallow((state) => ({
     connected: Boolean(state.bridge),
@@ -295,7 +301,7 @@ export function WorkbenchStatus({ onOpenPalette }: { onOpenPalette: () => void }
           <Kbd>{formatShortcut("shortcuts")}</Kbd>
         </Group>
       </Button>
-      <span>v0.1.0</span>
+      {version && <span>v{version}</span>}
     </footer>
   );
 }

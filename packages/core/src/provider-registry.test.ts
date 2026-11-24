@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { EffortLevel } from "@ide/protocol";
+import { expect, spyOn, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "./agents";
-import { geminiBlocked, prepareOpenCode } from "./cli-adapters";
-import type { AdapterRequest } from "./provider-adapter";
+import { geminiBlocked, prepareCodex, prepareOpenCode } from "./cli-adapters";
+import { geminiInvocation } from "./gemini";
+import * as localRuntimes from "./local-runtimes";
+import * as ollama from "./ollama";
 import { ProviderRegistry } from "./provider-registry";
 
 const registry = new ProviderRegistry(
@@ -13,15 +16,21 @@ const registry = new ProviderRegistry(
   async (id) => ({ models: [`${id}-cli-model`], defaultModel: `${id}-cli-model` }),
 );
 
-async function runFixture(id: string, script: string, run = (request: AdapterRequest) => registry.run(request)) {
+async function runFixture(id: string, script: string, options: {
+  effort?: EffortLevel;
+  supportedEfforts?: EffortLevel[];
+  run?: typeof registry.run;
+} = {}) {
   const fixture = await mkdtemp(join(tmpdir(), "uya-adapter-fixture-"));
   try {
     const command = join(fixture, "fixture-cli");
     await writeFile(command, "#!/bin/sh\nset -eu\n" + script, { mode: 0o700 });
     const events: [string, string][] = [];
+    const { effort, supportedEfforts, run = (request) => registry.run(request) } = options;
     const usage = await run({
-      provider: { id, name: "CLI Fixture", kind: "cli", command, structured: true, terminal: true, available: true },
+      provider: { id, name: "CLI Fixture", kind: "cli", command, structured: true, terminal: true, available: true, supportedEfforts },
       prompt: "/goal test @reference",
+      effort,
       messages: [
         { role: "user", content: "First turn" },
         { role: "assistant", content: "Keep this answer" },
@@ -44,14 +53,37 @@ test("registry advertises HTTP runtime capability separately from installed term
   for (const id of ["ollama", "llamacpp", "lmstudio", "mlx"]) {
     expect(sources.find((source) => source.id === id)).toMatchObject({
       kind: "runtime", available: true, structured: true, models: [`${id}-fixture`],
+      supportedEfforts: id === "ollama" ? ["minimal", "low", "medium", "high"] : ["low", "medium", "high"],
     });
   }
   expect(sources.find((source) => source.id === "kimi")?.structured).toBe(false);
 });
 
+test("registry forwards the requested effort to every local runtime", async () => {
+  const ollamaRun = spyOn(ollama, "runOllama").mockResolvedValue({});
+  const localRun = spyOn(localRuntimes, "runLocalRuntime").mockResolvedValue({});
+  try {
+    for (const provider of (await registry.discover()).filter((source) => source.kind === "runtime")) {
+      await registry.run({
+        provider, model: provider.models?.[0], prompt: "fixture", effort: "medium",
+        signal: AbortSignal.timeout(1_000),
+        output: { emit() {}, raw() {} },
+      });
+    }
+    expect(ollamaRun.mock.calls.map((args) => [args[0], args[7]])).toEqual([["ollama-fixture", "medium"]]);
+    expect(localRun.mock.calls.map((args) => [args[0], args[6]])).toEqual([
+      ["llamacpp", "medium"], ["mlx", "medium"], ["lmstudio", "medium"],
+    ]);
+  } finally {
+    ollamaRun.mockRestore();
+    localRun.mockRestore();
+  }
+});
+
 test("Qwen adapter opts out of tools and uses stdin for literal prompt and previous turns", async () => {
   const result = await runFixture("qwen", `
 case " $* " in *" --safe-mode --max-tool-calls 0 --input-format text --output-format stream-json "*) ;; *) exit 2;; esac
+[ ! -e .qwen/settings.json ]
 payload=$(/bin/cat)
 case "$payload" in *"Keep this answer"*"/goal test"*) ;; *) exit 3;; esac
 case "$payload" in "@*"|"/"*|*"@"*) exit 4;; esac
@@ -61,25 +93,70 @@ printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":3,"
   expect(result).toEqual({ events: [["text", "Qwen fixture"]], usage: { inputTokens: 3, outputTokens: 2 } });
 });
 
+test("Qwen adapter configures an advertised effort in the scratch workspace", async () => {
+  const result = await runFixture("qwen", `
+case " $* " in *" --safe-mode --max-tool-calls 0 --input-format text --output-format stream-json "*) ;; *) exit 2;; esac
+/usr/bin/grep -q '"reasoningEffort":"xhigh"' .qwen/settings.json
+/usr/bin/grep -q '"TRUST_FOLDER"' "$QWEN_CODE_TRUSTED_FOLDERS_PATH"
+/bin/cat >/dev/null
+printf '%s\\n' '{"type":"result","subtype":"success","result":"Qwen effort fixture"}'
+`, { effort: "xhigh", supportedEfforts: ["high", "xhigh"] });
+  expect(result.events).toEqual([["text", "Qwen effort fixture"]]);
+});
+
 const testGemini = geminiBlocked() ? test.skip : test;
 testGemini("Gemini adapter isolates settings and decodes assistant deltas", async () => {
   const result = await runFixture("gemini", `
 case " $* " in *" --extensions none --allowed-mcp-server-names "*" --policy "*" --approval-mode default --output-format stream-json "*) ;; *) exit 2;; esac
 /usr/bin/grep -q '"hooksConfig":{"enabled":false}' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 /usr/bin/grep -q '"tools":{"core":' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+/usr/bin/grep -q '"thinkingConfig":{"thinkingLevel":"HIGH"}' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 payload=$(/bin/cat)
 case "$payload" in *"Keep this answer"*"/goal test"*) ;; *) exit 3;; esac
 case "$payload" in "@"*|"/"*|*"@"*) exit 4;; esac
 printf '%s\\n' '{"type":"message","role":"assistant","content":"Gemini fixture","delta":true}'
 printf '%s\\n' '{"type":"message","role":"assistant","content":"Gemini fixture","delta":false}'
 printf '%s\\n' '{"type":"result","status":"success","stats":{"input_tokens":4,"output_tokens":2}}'
-`);
+`, { effort: "max" });
   expect(result).toEqual({ events: [["text", "Gemini fixture"]], usage: { inputTokens: 4, outputTokens: 2 } });
+});
+
+test("Gemini writes thinking settings for CLI chat aliases only when effort is set", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "uya-gemini-effort-"));
+  try {
+    for (const [effort, level, budget] of [
+      ["minimal", "MINIMAL", 512], ["low", "LOW", 1024], ["medium", "MEDIUM", 4096],
+      ["high", "HIGH", 8192], ["xhigh", "HIGH", 8192], ["max", "HIGH", 8192],
+    ] as const) {
+      const { settingsPath } = await geminiInvocation(directory, "stream-json", effort);
+      const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+      expect(settings.modelConfigs.customOverrides).toContainEqual({
+        match: { model: "chat-base-3" },
+        modelConfig: { generateContentConfig: { thinkingConfig: { thinkingLevel: level } } },
+      });
+      expect(settings.modelConfigs.customOverrides).toContainEqual({
+        match: { model: "chat-base-2.5" },
+        modelConfig: { generateContentConfig: { thinkingConfig: { thinkingBudget: budget } } },
+      });
+      if (effort === "minimal") {
+        expect(settings.modelConfigs.customOverrides).toContainEqual({
+          match: { model: "gemini-3.1-pro-preview" },
+          modelConfig: { generateContentConfig: { thinkingConfig: { thinkingLevel: "LOW" } } },
+        });
+      }
+    }
+    const { settingsPath } = await geminiInvocation(directory);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).not.toHaveProperty("modelConfigs");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("OpenCode adapter uses the isolated tool-denying agent and parses normalized usage", async () => {
   const result = await runFixture("opencode", `
 case " $* " in *" --pure run --format json --thinking --agent uya-structured-"*" --title Uya run "*) ;; *) exit 2;; esac
+case " $* " in *" --variant high "*) ;; *) exit 4;; esac
+case "$OPENCODE_CONFIG_CONTENT" in *'"share":"disabled"'*'"permission":{"*":"deny"}'*'"mode":"primary","permission":{"*":"deny"},"variant":"high"'*) ;; *) exit 5;; esac
 [ "$XDG_CONFIG_HOME" = "$OPENCODE_CONFIG_DIR" ]
 [ "$XDG_DATA_HOME" = "$XDG_CONFIG_HOME" ]
 [ "$OPENCODE_AUTH_CONTENT" = '{}' ]
@@ -91,20 +168,21 @@ printf '%s\\n' '{"type":"step_start"}'
 printf '%s\\n' '{"type":"reasoning","part":{"text":"Fixture rationale"}}'
 printf '%s\\n' '{"type":"text","part":{"text":"OpenCode fixture"}}'
 printf '%s\\n' '{"type":"step_finish","part":{"tokens":{"input":5,"output":3}}}'
-`, (request) => runCli(request, prepareOpenCode));
+`, { effort: "high", run: (request) => runCli(request, prepareOpenCode) });
   expect(result).toEqual({
     events: [["thinking", "Fixture rationale"], ["text", "OpenCode fixture"]],
     usage: { inputTokens: 5, outputTokens: 3 },
   });
 });
 
-test("Claude adapter passes --model, captures init model, and classifies result auth errors", async () => {
+test("Claude adapter passes --model and mapped --effort, captures the model, and classifies auth errors", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-claude-fixture-"));
   try {
     const okCommand = join(fixture, "claude-ok");
     await writeFile(okCommand, `#!/bin/sh
 set -eu
 case " $* " in *" --model claude-opus-4-6 "*) ;; *) exit 2;; esac
+case " $* " in *" --effort high "*) ;; *) exit 3;; esac
 /bin/cat >/dev/null
 printf '%s\\n' '{"type":"system","subtype":"init","model":"claude-opus-4-6"}'
 printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"Fallback result text","usage":{"input_tokens":7,"output_tokens":4}}'
@@ -113,6 +191,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"
     const usage = await registry.run({
       provider: { id: "claude", name: "Claude Code", kind: "cli", command: okCommand, structured: true, terminal: true, available: true },
       model: "claude-opus-4-6",
+      effort: "xhigh",
       prompt: "hi",
       signal: AbortSignal.timeout(3_000),
       output: { emit: (kind, text) => { events.push([kind, text]); }, raw: () => {} },
@@ -140,13 +219,14 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":true,"result":"F
   }
 });
 
-test("Codex adapter passes --model and supports delta and content block formats without duplication", async () => {
+test("Codex adapter passes --model and effort before exec and streams content without duplication", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-codex-fixture-"));
   try {
     const command = join(fixture, "codex-ok");
     await writeFile(command, `#!/bin/sh
 set -eu
 case " $* " in *" --model gpt-6.2-sol "*) ;; *) exit 2;; esac
+case " $* " in *' -c model_reasoning_effort="low" exec '*) ;; *) exit 3;; esac
 /bin/cat >/dev/null
 printf '%s\\n' '{"type":"item.delta","item":{"id":"msg_1","type":"agent_message"},"delta":"Hello "}'
 printf '%s\\n' '{"type":"item.delta","item":{"id":"msg_1","type":"agent_message"},"delta":"world"}'
@@ -158,6 +238,7 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_toke
     const usage = await registry.run({
       provider: { id: "codex", name: "Codex", kind: "cli", command, structured: true, terminal: true, available: true },
       model: "gpt-6.2-sol",
+      effort: "minimal",
       prompt: "hi",
       signal: AbortSignal.timeout(3_000),
       output: { emit: (kind, text) => { events.push([kind, text]); }, raw: () => {} },
@@ -165,6 +246,47 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_toke
     expect(events).toEqual([["text", "Hello "], ["text", "world"], ["text", "!"]]);
     expect(usage).toEqual({ inputTokens: 10, outputTokens: 3 });
   } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Codex omits the effort override for unset or unrecognized values", async () => {
+  for (const effort of [undefined, 'high" -c web_search="live' as EffortLevel]) {
+    const { args } = await prepareCodex({
+      provider: { id: "codex", name: "Codex", kind: "cli", structured: true, terminal: true, available: true },
+      prompt: "fixture", effort, signal: AbortSignal.timeout(1_000), output: { emit() {}, raw() {} },
+    }, "", {});
+    expect(args.some((arg) => arg.startsWith("model_reasoning_effort="))).toBe(false);
+  }
+});
+
+test("registry reports discovered CLI effort metadata and built-in fallbacks", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-registry-efforts-"));
+  const previousPath = process.env.PATH;
+  try {
+    for (const id of ["codex", "claude", "qwen"]) {
+      await writeFile(join(fixture, id), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    }
+    process.env.PATH = fixture;
+    const sources = await new ProviderRegistry(async () => [], async () => [], async (id) => id === "codex"
+      ? {
+        models: ["codex-fixture"], defaultModel: "codex-fixture", defaultEffort: "xhigh",
+        supportedEfforts: ["medium", "xhigh"], modelEfforts: { "codex-fixture": ["medium", "xhigh"] },
+      }
+      : { models: [] }).discover();
+    expect(sources.find((source) => source.id === "codex")).toMatchObject({
+      defaultModel: "codex-fixture", defaultEffort: "xhigh",
+      supportedEfforts: ["medium", "xhigh"], modelEfforts: { "codex-fixture": ["medium", "xhigh"] },
+    });
+    expect(sources.find((source) => source.id === "claude")?.supportedEfforts).toEqual(["low", "medium", "high", "max"]);
+    expect(sources.find((source) => source.id === "qwen")?.supportedEfforts).toBeUndefined();
+    expect(sources.find((source) => source.id === "gemini")?.supportedEfforts).toBeUndefined();
+    for (const source of sources.filter((source) => source.kind === "runtime")) {
+      expect(source.structured).toBe(false);
+      expect(source.supportedEfforts).toBeUndefined();
+    }
+  } finally {
+    process.env.PATH = previousPath;
     await rm(fixture, { recursive: true, force: true });
   }
 });
@@ -233,6 +355,7 @@ test("registry leaves managed and terminal-only providers in the terminal withou
         const provider = sources.find((entry) => entry.id === id);
         expect(provider).toMatchObject({ available: true, terminal: true, structured: false });
         expect(provider?.models).toBeUndefined();
+        expect(provider?.supportedEfforts).toBeUndefined();
       }
     }
     expect(calls).toEqual([]);

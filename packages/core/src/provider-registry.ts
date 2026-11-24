@@ -1,10 +1,10 @@
-import type { Provider } from "@ide/protocol";
+import type { EffortLevel, Provider } from "@ide/protocol";
 import { runCli, type CliPrepare } from "./agents";
 import {
   geminiBlocked, openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli, prepareGemini, prepareOpenCode, prepareQwen,
 } from "./cli-adapters";
 import {
-  discoverCliModels, type CliModelDiscoverer, type CliModelDiscovery,
+  discoverCliModels, fallbackCliEfforts, type CliModelDiscoverer, type CliModelDiscovery,
 } from "./cli-models";
 import { customStructuredBlockReason } from "./custom-cli";
 import { discoverLocalRuntimeModels, runLocalRuntime, type LocalRuntimeId } from "./local-runtimes";
@@ -74,6 +74,9 @@ function cliAdapter(
         available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && prepare && !unavailable),
         models: discovered?.models.length ? discovered.models : undefined,
         defaultModel: discovered?.defaultModel,
+        supportedEfforts: discovered && (discovered.supportedEfforts ?? fallbackCliEfforts(id)),
+        defaultEffort: discovered?.defaultEffort,
+        modelEfforts: discovered?.modelEfforts,
         detail: unavailable ?? detail,
       };
     },
@@ -91,9 +94,12 @@ interface RuntimeDefinition {
   executable: string;
   discoverModels: () => Promise<string[]>;
   generate: (model: string, request: AdapterRequest) => Promise<Usage>;
+  supportedEfforts: EffortLevel[];
 }
 
-function runtimeAdapter({ id, name, executable: configured, discoverModels, generate }: RuntimeDefinition): ProviderAdapter {
+function runtimeAdapter({
+  id, name, executable: configured, discoverModels, generate, supportedEfforts,
+}: RuntimeDefinition): ProviderAdapter {
   return {
     id,
     async discover() {
@@ -104,6 +110,7 @@ function runtimeAdapter({ id, name, executable: configured, discoverModels, gene
         available: Boolean(command) || models.length > 0,
         terminal: Boolean(command),
         structured: models.length > 0,
+        supportedEfforts: models.length ? supportedEfforts : undefined,
         detail: models.length ? undefined : "Start its local inference server with a local model",
       };
     },
@@ -161,7 +168,10 @@ export class ProviderRegistry {
     const local = (id: LocalRuntimeId, name: string, command: string) => runtimeAdapter({
       id, name, executable: command,
       discoverModels: () => discoverLocal(id),
-      generate: (model, request) => runLocalRuntime(id, model, request.messages ?? request.prompt, request.signal, request.output),
+      supportedEfforts: ["low", "medium", "high"],
+      generate: (model, request) => runLocalRuntime(
+        id, model, request.messages ?? request.prompt, request.signal, request.output, undefined, request.effort,
+      ),
     });
 
     const cli = (definition: CliDefinition) => cliAdapter(definition, discoverCli);
@@ -182,10 +192,11 @@ export class ProviderRegistry {
       runtimeAdapter({
         id: "ollama", name: "Ollama", executable: "ollama",
         discoverModels: discoverOllama,
-        generate: (model, { messages, prompt, signal, output }) => runOllama(
+        supportedEfforts: ["minimal", "low", "medium", "high"],
+        generate: (model, { messages, prompt, signal, output, effort }) => runOllama(
           model, messages ?? prompt, signal,
           (text) => output.emit("text", text), output.raw, undefined,
-          (text) => output.emit("thinking", text),
+          (text) => output.emit("thinking", text), effort,
         ),
       }),
     ];

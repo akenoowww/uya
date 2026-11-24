@@ -1,10 +1,15 @@
+import type { EffortLevel } from "@ide/protocol";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { version as clientVersion } from "../package.json";
-import { discoverCliModels, isSafeCliModelName } from "./cli-models";
+import { discoverCliModels, isSafeCliModelName, normalizeEffortLevel, type CliModelDiscovery } from "./cli-models";
+
+const codexFallback: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+const claudeEfforts: EffortLevel[] = ["low", "medium", "high", "max"];
+const geminiEfforts: EffortLevel[] = ["minimal", "low", "medium", "high", "max"];
 
 function fixtureEnv(): NodeJS.ProcessEnv {
   if (process.platform !== "win32") return {};
@@ -42,6 +47,15 @@ test("validates CLI model names safely against flag injection and whitespace", (
   expect(isSafeCliModelName("")).toBe(false);
 });
 
+test("normalizes only known effort levels", () => {
+  for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+    expect(normalizeEffortLevel(level)).toBe(level);
+  }
+  for (const level of ["ultra", "high\n", 'high" --flag', "", null, { effort: "high" }]) {
+    expect(normalizeEffortLevel(level)).toBeUndefined();
+  }
+});
+
 test("discovers Codex models live via paginated app-server model/list and strips secrets", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-codex-"));
   try {
@@ -68,8 +82,12 @@ rl.on("line", (line) => {
         id: msg.id,
         result: {
           data: [
-            { id: "gpt-6.2-sol", model: "gpt-6.2-sol", hidden: false, isDefault: true },
-            { id: "gpt-internal", model: "gpt-internal", hidden: true, isDefault: false },
+            {
+              id: "catalog-sol", model: "gpt-6.2-sol", hidden: false, isDefault: true,
+              supportedReasoningLevels: [{ effort: "high" }, { effort: "medium" }, { effort: "ultra" }, "medium"],
+              defaultReasoningLevel: "medium",
+            },
+            { id: "gpt-internal", model: "gpt-internal", hidden: true, supportedReasoningLevels: ["max"] },
             { id: "--bad-flag", model: "--bad-flag", hidden: false, isDefault: false },
           ],
           nextCursor: "page-2",
@@ -81,7 +99,11 @@ rl.on("line", (line) => {
         id: msg.id,
         result: {
           data: [
-            { id: "gpt-6.2-astra", model: "gpt-6.2-astra", hidden: false, isDefault: false },
+            {
+              id: "gpt-6.2-astra", hidden: false, isDefault: false,
+              supported_reasoning_levels: ["low", "high", "xhigh"],
+              default_reasoning_level: "high",
+            },
             { id: "gpt-hidden-vis", visibility: "hide" },
           ],
           nextCursor: null,
@@ -103,6 +125,12 @@ rl.on("line", (line) => {
     expect(discovered).toEqual({
       defaultModel: "gpt-6.2-sol",
       models: ["gpt-6.2-sol", "gpt-6.2-astra"],
+      defaultEffort: "medium",
+      supportedEfforts: ["low", "medium", "high", "xhigh"],
+      modelEfforts: {
+        "gpt-6.2-sol": ["medium", "high"],
+        "gpt-6.2-astra": ["low", "high", "xhigh"],
+      },
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -114,27 +142,44 @@ test("falls back to Codex local CLI cache when app-server is unavailable", async
   try {
     const codexHome = join(fixture, ".codex");
     await mkdir(codexHome, { recursive: true });
-    await writeFile(join(codexHome, "config.toml"), 'model = "gpt-6.2-sol"\n[features]\nmodel = "ignored-section"\n');
+    const config = join(codexHome, "config.toml");
+    await writeFile(config, 'model = "gpt-6.2-sol"\n[features]\nmodel_reasoning_effort = "low"\n');
     await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({
       models: [
-        { slug: "gpt-6.2-astra", visibility: "list" },
+        {
+          slug: "gpt-6.2-astra", visibility: "list", is_default: true,
+          supported_reasoning_levels: ["medium", { effort: "max" }], default_reasoning_level: "max",
+        },
         { slug: "gpt-internal", visibility: "hide" },
-        { slug: "gpt-6.2-sol", visibility: "list" },
+        {
+          slug: "gpt-6.2-sol", visibility: "list",
+          supported_reasoning_levels: [{ effort: "high" }, "xhigh", "ultra"], default_reasoning_level: "high",
+        },
         { slug: "--bad-flag", visibility: "list" },
       ],
     }));
     const failingCli = await createFakeCli(fixture, "codex-old", "process.exit(1);");
 
-    const discovered = await discoverCliModels("codex", {
+    const options = {
       command: failingCli,
       home: fixture,
       env: { ...fixtureEnv(), CODEX_HOME: codexHome },
       timeoutMs: 2_000,
-    });
-    expect(discovered).toEqual({
+    };
+    const cached: CliModelDiscovery = {
       defaultModel: "gpt-6.2-sol",
       models: ["gpt-6.2-sol", "gpt-6.2-astra"],
-    });
+      supportedEfforts: ["medium", "high", "xhigh", "max"],
+      defaultEffort: "high",
+      modelEfforts: {
+        "gpt-6.2-astra": ["medium", "max"],
+        "gpt-6.2-sol": ["high", "xhigh"],
+      },
+    };
+    expect(await discoverCliModels("codex", options)).toEqual(cached);
+
+    await writeFile(config, 'model = "gpt-6.2-sol"\nmodel_reasoning_effort = "xhigh"\n');
+    expect(await discoverCliModels("codex", options)).toEqual({ ...cached, defaultEffort: "xhigh" });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -147,7 +192,7 @@ test("measures the config size limit in bytes before decoding", async () => {
     await writeFile(join(fixture, "config.toml"), 'model = "ignored-model"\n#' + "é".repeat(1024 * 1024));
     expect(await discoverCliModels("codex", {
       command, home: fixture, env: { ...fixtureEnv(), CODEX_HOME: fixture }, timeoutMs: 2_000,
-    })).toEqual({ models: [], defaultModel: undefined });
+    })).toEqual({ models: [], supportedEfforts: codexFallback });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -163,7 +208,7 @@ test.skipIf(process.platform === "win32")("reads a symlink to a regular config a
     await symlink(regular, config);
     expect(await discoverCliModels("codex", {
       command, home: fixture, env: { CODEX_HOME: fixture }, timeoutMs: 2_000,
-    })).toEqual({ models: ["fixture-model"], defaultModel: "fixture-model" });
+    })).toEqual({ models: ["fixture-model"], defaultModel: "fixture-model", supportedEfforts: codexFallback });
 
     const fifo = join(fixture, "fifo");
     await unlink(config);
@@ -179,7 +224,7 @@ test.skipIf(process.platform === "win32")("reads a symlink to a regular config a
        })));`,
       command, fixture,
     ], { encoding: "utf8", env: {}, timeout: 3_000 });
-    expect(JSON.parse(output)).toEqual({ models: [] });
+    expect(JSON.parse(output)).toEqual({ models: [], supportedEfforts: codexFallback });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -189,7 +234,8 @@ test("discovers Claude models via stream-json initialize control_request", async
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-claude-"));
   try {
     await mkdir(join(fixture, ".claude"), { recursive: true });
-    await writeFile(join(fixture, ".claude", "settings.json"), JSON.stringify({ model: "opus[1m]" }));
+    const settings = join(fixture, ".claude", "settings.json");
+    await writeFile(settings, JSON.stringify({ model: "opus[1m]", effortLevel: "high", effort: "low" }));
     const command = await createFakeCli(fixture, "claude", `
 import readline from "node:readline";
 import { readFileSync } from "node:fs";
@@ -226,16 +272,21 @@ rl.on("line", (line) => {
   }
 });
 `);
-    const discovered = await discoverCliModels("claude", {
+    const options = {
       command,
       home: fixture,
       env: fixtureEnv(),
       timeoutMs: 3_000,
-    });
-    expect(discovered).toEqual({
+    };
+    const expected = {
       defaultModel: "opus[1m]",
       models: ["opus[1m]", "sonnet[1m]", "haiku"],
-    });
+      supportedEfforts: claudeEfforts,
+    };
+    expect(await discoverCliModels("claude", options)).toEqual({ ...expected, defaultEffort: "high" });
+
+    await writeFile(settings, JSON.stringify({ model: "opus[1m]", effortLevel: "ultra", effort: "max" }));
+    expect(await discoverCliModels("claude", options)).toEqual({ ...expected, defaultEffort: "max" });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
@@ -284,6 +335,7 @@ rl.on("line", (line) => {
     expect(discovered).toEqual({
       defaultModel: undefined,
       models: ["auto", "gemini-3.1-pro-preview", "gemini-3.5-flash"],
+      supportedEfforts: geminiEfforts,
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -306,7 +358,7 @@ test("leaves a managed Gemini CLI for the interactive terminal", async () => {
   }
 });
 
-test("discovers Qwen models via flat and grouped ACP model options", async () => {
+test("discovers Qwen models and optional effort via flat and grouped ACP options", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-acp-"));
   try {
     const qwen = await createFakeCli(fixture, "qwen", `
@@ -335,6 +387,17 @@ rl.on("line", (line) => {
               { group: "recommended", options: [{ value: "qwen3-max-latest", name: "Qwen3 Max" }] },
             ],
           },
+          ...(process.env.FIXTURE_EFFORT ? [
+            {
+              id: "reasoning_effort", category: "thought_level", type: "select", currentValue: "medium",
+              options: [
+                { value: "default" },
+                { value: "low" },
+                { group: "levels", options: [{ value: "medium" }, { value: "xhigh" }, { value: "ultra" }] },
+              ],
+            },
+            { id: "depth", category: "effort", options: [{ value: "max" }] },
+          ] : []),
         ],
       },
     }));
@@ -342,9 +405,16 @@ rl.on("line", (line) => {
 });
 `);
 
-    expect(await discoverCliModels("qwen", { command: qwen, home: fixture, env: fixtureEnv(), timeoutMs: 3_000 })).toEqual({
+    const options = { command: qwen, home: fixture, env: fixtureEnv(), timeoutMs: 3_000 };
+    const modelDiscovery = {
       defaultModel: "qwen3-coder-next",
       models: ["qwen3-coder-next", "qwen3-max-latest"],
+    };
+    expect(await discoverCliModels("qwen", options)).toEqual(modelDiscovery);
+    expect(await discoverCliModels("qwen", { ...options, env: { ...options.env, FIXTURE_EFFORT: "1" } })).toEqual({
+      ...modelDiscovery,
+      defaultEffort: "medium",
+      supportedEfforts: ["low", "medium", "xhigh", "max"],
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -374,6 +444,7 @@ console.log("--bad/model");
     expect(initial).toEqual({
       defaultModel: undefined,
       models: ["opencode/big-pickle", "anthropic/claude-sonnet-4-6"],
+      supportedEfforts: ["low", "medium", "high", "max"],
     });
 
     const refreshed = await discoverCliModels("opencode", {
@@ -386,6 +457,7 @@ console.log("--bad/model");
     expect(refreshed).toEqual({
       defaultModel: undefined,
       models: ["opencode/big-pickle", "anthropic/claude-sonnet-4-6", "openai/gpt-6.2-sol"],
+      supportedEfforts: ["low", "medium", "high", "max"],
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -401,16 +473,16 @@ test("returns no hardcoded fallback models when CLI fails, times out, or is miss
 
     expect(await discoverCliModels("gemini", { home: fixture, env: {} })).toEqual({ models: [] });
     expect(await discoverCliModels("gemini", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
-      defaultModel: undefined,
       models: [],
+      supportedEfforts: geminiEfforts,
     });
     expect(await discoverCliModels("claude", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
-      defaultModel: undefined,
       models: [],
+      supportedEfforts: claudeEfforts,
     });
     expect(await discoverCliModels("codex", { command: hanging, home: fixture, env: { ...fixtureEnv(), CODEX_HOME: join(fixture, ".codex") }, timeoutMs: 250 })).toEqual({
-      defaultModel: undefined,
       models: [],
+      supportedEfforts: codexFallback,
     });
     await Bun.sleep(1_400);
     await expect(access(markerPath)).rejects.toThrow();

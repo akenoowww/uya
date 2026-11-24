@@ -1,3 +1,4 @@
+import type { EffortLevel } from "@ide/protocol";
 import { execFile, spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -7,10 +8,16 @@ import { version as clientVersion } from "../package.json";
 import { cliEnv, spawnTarget } from "./agents";
 import { claudeIsolationArgs } from "./claude";
 import { geminiHasUnmanagedSettings, geminiInvocation } from "./gemini";
+import { effortLevels, normalizeEffortLevel } from "./provider-adapter";
+
+export { normalizeEffortLevel } from "./provider-adapter";
 
 export interface CliModelDiscovery {
   models: string[];
   defaultModel?: string;
+  supportedEfforts?: EffortLevel[];
+  defaultEffort?: EffortLevel;
+  modelEfforts?: Record<string, EffortLevel[]>;
 }
 
 export interface DiscoverCliModelsOptions {
@@ -30,6 +37,15 @@ const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 const MAX_PROBE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
 const MAX_MODEL_PAGES = 5;
+
+export function fallbackCliEfforts(id: string): EffortLevel[] | undefined {
+  switch (id) {
+    case "codex": return ["low", "medium", "high", "xhigh", "max"];
+    case "claude":
+    case "opencode": return ["low", "medium", "high", "max"];
+    case "gemini": return ["minimal", "low", "medium", "high", "max"];
+  }
+}
 
 const CODEX_DISCOVERY_ARGS = [
   "-c", "features.hooks=false",
@@ -82,6 +98,11 @@ function uniqueModels(candidates: Iterable<unknown>): string[] {
     }
   }
   return [...seen];
+}
+
+function uniqueEfforts(candidates: Iterable<unknown>): EffortLevel[] {
+  const seen = new Set(candidates);
+  return effortLevels.filter((level) => seen.has(level));
 }
 
 function readBoundedText(path: string): string | undefined {
@@ -326,23 +347,31 @@ async function withTempDir<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
   }
 }
 
-function readCodexConfigDefault(home: string, env: NodeJS.ProcessEnv): string | undefined {
-  const codexHome = env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME : join(home, ".codex");
-  const configText = readBoundedText(join(codexHome, "config.toml"));
-  const configured = configText ? parseTopLevelTomlString(configText, "model") : undefined;
-  return normalizeDefaultModel(configured);
+interface CodexModel {
+  slug: string;
+  isDefault: boolean;
+  supportedEfforts: EffortLevel[];
+  defaultEffort?: EffortLevel;
 }
 
-function readCodexLocalCache(home: string, env: NodeJS.ProcessEnv): string[] {
-  const codexHome = env.CODEX_HOME && env.CODEX_HOME.trim() ? env.CODEX_HOME : join(home, ".codex");
+function parseCodexModel(value: unknown): CodexModel | undefined {
+  const entry = asObject(value);
+  if (!entry || entry.hidden === true || entry.visibility === "hide") return;
+  const slug = entry.model ?? entry.slug ?? entry.id;
+  if (!isSafeCliModelName(slug) || isPlaceholderModel(slug)) return;
+  const levels = entry.supported_reasoning_levels ?? entry.supportedReasoningLevels;
+  return {
+    slug,
+    isDefault: entry.isDefault === true || entry.is_default === true,
+    supportedEfforts: uniqueEfforts(Array.isArray(levels) ? levels.map((level) => asObject(level)?.effort ?? level) : []),
+    defaultEffort: normalizeEffortLevel(entry.default_reasoning_level ?? entry.defaultReasoningLevel),
+  };
+}
+
+function readCodexLocalCache(codexHome: string): CodexModel[] {
   const cache = parseJsonObject(join(codexHome, "models_cache.json"));
   const entries = Array.isArray(cache?.models) ? cache.models : [];
-  return uniqueModels(entries.flatMap((entry) => {
-    const record = asObject(entry);
-    if (!record || record.hidden === true || record.visibility === "hide") return [];
-    const slug = record.model ?? record.slug ?? record.id;
-    return typeof slug === "string" ? [slug] : [];
-  }));
+  return entries.map(parseCodexModel).filter((model) => model !== undefined);
 }
 
 async function discoverCodexModels(
@@ -352,9 +381,11 @@ async function discoverCodexModels(
   timeoutMs: number,
 ): Promise<CliModelDiscovery> {
   const env = baseEnv ?? process.env;
-  const configuredDefault = readCodexConfigDefault(home, env);
-  const discovered: string[] = [];
-  let catalogDefault: string | undefined;
+  const codexHome = env.CODEX_HOME?.trim() ? env.CODEX_HOME : join(home, ".codex");
+  const configText = readBoundedText(join(codexHome, "config.toml")) ?? "";
+  const configuredModel = normalizeDefaultModel(parseTopLevelTomlString(configText, "model"));
+  const configuredEffort = normalizeEffortLevel(parseTopLevelTomlString(configText, "model_reasoning_effort"));
+  const discovered: CodexModel[] = [];
   let listRequestId = 2;
   let pages = 0;
 
@@ -398,13 +429,8 @@ async function discoverCodexModels(
       const result = asObject(msg.result);
       const data = Array.isArray(result?.data) ? result.data : [];
       for (const entry of data) {
-        const record = asObject(entry);
-        if (!record || record.hidden === true || record.visibility === "hide") continue;
-        const slug = record.model ?? record.id ?? record.slug;
-        if (isSafeCliModelName(slug) && !isPlaceholderModel(slug)) {
-          discovered.push(slug);
-          if (record.isDefault === true) catalogDefault ??= normalizeDefaultModel(slug);
-        }
+        const model = parseCodexModel(entry);
+        if (model) discovered.push(model);
       }
       const nextCursor = typeof result?.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
       pages += 1;
@@ -422,17 +448,19 @@ async function discoverCodexModels(
     },
   }));
 
-  const liveOrCache = discovered.length > 0 ? discovered : readCodexLocalCache(home, env);
-  const models = uniqueModels([configuredDefault, ...liveOrCache]);
+  const catalog = discovered.length ? discovered : readCodexLocalCache(codexHome);
+  const defaultModel = configuredModel ?? catalog.find((model) => model.isDefault && normalizeDefaultModel(model.slug))?.slug;
+  const modelEfforts = Object.fromEntries(catalog
+    .filter((model) => model.supportedEfforts.length > 0)
+    .map((model) => [model.slug, model.supportedEfforts]));
+  const supportedEfforts = uniqueEfforts(Object.values(modelEfforts).flat());
   return {
-    models,
-    defaultModel: configuredDefault ?? catalogDefault,
+    models: uniqueModels([configuredModel, ...catalog.map((model) => model.slug)]),
+    defaultModel,
+    supportedEfforts: supportedEfforts.length ? supportedEfforts : fallbackCliEfforts("codex"),
+    defaultEffort: configuredEffort ?? catalog.find((model) => model.slug === defaultModel)?.defaultEffort,
+    modelEfforts: supportedEfforts.length ? modelEfforts : undefined,
   };
-}
-
-function readClaudeConfigDefault(home: string): string | undefined {
-  const settings = parseJsonObject(join(home, ".claude", "settings.json"));
-  return normalizeDefaultModel(settings?.model);
 }
 
 async function discoverClaudeModels(
@@ -441,7 +469,9 @@ async function discoverClaudeModels(
   baseEnv: NodeJS.ProcessEnv | undefined,
   timeoutMs: number,
 ): Promise<CliModelDiscovery> {
-  const configuredDefault = readClaudeConfigDefault(home);
+  const settings = parseJsonObject(join(home, ".claude", "settings.json"));
+  const configuredDefault = normalizeDefaultModel(settings?.model);
+  const defaultEffort = normalizeEffortLevel(settings?.effortLevel) ?? normalizeEffortLevel(settings?.effort);
   const discovered: string[] = [];
 
   await withTempDir(async (cwd) => runCliProbe({
@@ -481,14 +511,30 @@ async function discoverClaudeModels(
   }));
 
   const models = uniqueModels([configuredDefault, ...discovered]);
-  return { models, defaultModel: configuredDefault };
+  return { models, defaultModel: configuredDefault, supportedEfforts: fallbackCliEfforts("claude"), defaultEffort };
+}
+
+function acpOptionValues(value: unknown): unknown[] {
+  const options = Array.isArray(value) ? value : [];
+  return options
+    .flatMap((item) => {
+      const group = asObject(item)?.options;
+      return Array.isArray(group) ? group : [item];
+    })
+    .map((item) => {
+      if (typeof item === "string") return item;
+      const entry = asObject(item);
+      return entry?.value ?? entry?.id;
+    });
 }
 
 function extractAcpModels(result: JsonObject | undefined): CliModelDiscovery {
   if (!result) return { models: [] };
 
-  const candidates: string[] = [];
+  const candidates: unknown[] = [];
   let defaultModel: string | undefined;
+  const effortCandidates: unknown[] = [];
+  let defaultEffort: EffortLevel | undefined;
 
   const modelsSection = asObject(result.models);
   if (modelsSection) {
@@ -512,29 +558,21 @@ function extractAcpModels(result: JsonObject | undefined): CliModelDiscovery {
     const isModelOption = record.category === "model"
       || record.id === "model"
       || record.configId === "model";
-    if (!isModelOption) continue;
-
-    defaultModel ??= normalizeDefaultModel(record.currentValue);
-    const options = Array.isArray(record.options) ? record.options : [];
-    for (const item of options) {
-      const entry = asObject(item);
-      if (!entry) continue;
-      if (Array.isArray(entry.options)) {
-        for (const grouped of entry.options) {
-          const groupedEntry = asObject(grouped);
-          const value = groupedEntry?.value ?? groupedEntry?.id;
-          if (typeof value === "string") candidates.push(value);
-        }
-      } else {
-        const value = entry.value ?? entry.id;
-        if (typeof value === "string") candidates.push(value);
-      }
+    if (isModelOption) {
+      defaultModel ??= normalizeDefaultModel(record.currentValue);
+      for (const value of acpOptionValues(record.options)) candidates.push(value);
+    } else if ([record.category, record.id, record.configId]
+      .some((key) => key === "effort" || key === "reasoning_effort" || key === "thought_level")) {
+      defaultEffort ??= normalizeEffortLevel(record.currentValue);
+      for (const value of acpOptionValues(record.options)) effortCandidates.push(value);
     }
   }
 
+  const supportedEfforts = uniqueEfforts(effortCandidates);
   return {
     models: uniqueModels(candidates),
     defaultModel,
+    ...(supportedEfforts.length ? { supportedEfforts, defaultEffort } : {}),
   };
 }
 
@@ -624,6 +662,7 @@ async function discoverGeminiModels(
     return {
       models: uniqueModels([defaultModel, ...discovered.models]),
       defaultModel,
+      supportedEfforts: fallbackCliEfforts("gemini"),
     };
   });
 }
@@ -701,7 +740,7 @@ async function discoverOpenCodeModels(
   const defaultModel = configuredDefault && models.includes(configuredDefault)
     ? configuredDefault
     : undefined;
-  return { models, defaultModel };
+  return { models, defaultModel, supportedEfforts: fallbackCliEfforts("opencode") };
 }
 
 export async function discoverCliModels(

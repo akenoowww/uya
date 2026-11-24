@@ -103,6 +103,17 @@ describe("local runtime adapters", () => {
     expect(lines.join("\n")).not.toContain("fixture-opaque");
   });
 
+  test.each([
+    ["minimal", "low"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "high"], ["max", "high"],
+  ] as const)("sends local effort %s as reasoning_effort=%s", async (effort, expected) => {
+    const { output } = collect();
+    await runLocalRuntime("llamacpp", "fixture", "fixture prompt", new AbortController().signal, output, async (_url, init) => {
+      if (init.method === "GET") return modelList([{ id: "fixture", owned_by: "llamacpp" }]);
+      expect(JSON.parse(init.body as string)).toMatchObject({ reasoning_effort: expected });
+      return stream('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    }, effort);
+  });
+
   test("rejects a stale model before transmitting a prompt, and rejects tool or error frames", async () => {
     const { output, lines } = collect();
     const signal = new AbortController().signal;

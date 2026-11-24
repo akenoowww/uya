@@ -74,6 +74,66 @@ test("streams fragmented UTF-8 records and reports terminal usage", async () => 
   expect(usage).toEqual({ inputTokens: 4, outputTokens: 1 });
 });
 
+test.each([
+  ["minimal", false], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "high"], ["max", "high"],
+] as const)("sends Ollama effort %s as think=%p", async (effort, think) => {
+  await runOllama(tag, "fixture", new AbortController().signal, noOutput, noOutput, async (url, init) => {
+    if (url.endsWith("/api/tags")) return tags();
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: tag, messages: [{ role: "user", content: "fixture" }], stream: true, think,
+    });
+    return new Response('{"done":true}\n');
+  }, undefined, effort);
+});
+
+test.each([
+  ["minimal", false], ["high", "high"],
+] as const)("retries without think after Ollama rejects effort %s", async (effort, think) => {
+  const sent: unknown[] = [];
+  const text: string[] = [];
+  let rejectedBodyCancelled = false;
+  const usage = await runOllama(tag, "fixture", new AbortController().signal, (delta) => text.push(delta), noOutput, async (url, init) => {
+    if (url.endsWith("/api/tags")) return tags();
+    sent.push(JSON.parse(init.body as string));
+    if (sent.length === 1) {
+      return new Response(new ReadableStream({
+        cancel() { rejectedBodyCancelled = true; },
+      }), { status: 400 });
+    }
+    expect(rejectedBodyCancelled).toBe(true);
+    return new Response('{"message":{"content":"fixture reply"},"done":true,"eval_count":2}\n');
+  }, undefined, effort);
+  const defaultBody = { model: tag, messages: [{ role: "user", content: "fixture" }], stream: true };
+  expect(sent).toEqual([{ ...defaultBody, think }, defaultBody]);
+  expect(text).toEqual(["fixture reply"]);
+  expect(usage.outputTokens).toBe(2);
+});
+
+test.each([
+  ["high", 400, 2], ["high", 500, 1], [undefined, 400, 1],
+] as const)("bounds Ollama retries for effort %p and HTTP %i", async (effort, status, attempts) => {
+  let posts = 0;
+  await expect(runOllama(tag, "fixture", new AbortController().signal, noOutput, noOutput, async (url) => {
+    if (url.endsWith("/api/tags")) return tags();
+    posts += 1;
+    return new Response(null, { status });
+  }, undefined, effort)).rejects.toThrow(`Ollama chat failed (HTTP ${status})`);
+  expect(posts).toBe(attempts);
+});
+
+test("honors cancellation before retrying a rejected Ollama thinking option", async () => {
+  const abort = new AbortController();
+  let posts = 0;
+  await expect(runOllama(tag, "fixture", abort.signal, noOutput, noOutput, async (url) => {
+    if (url.endsWith("/api/tags")) return tags();
+    posts += 1;
+    return new Response(new ReadableStream({
+      cancel() { abort.abort(); },
+    }), { status: 400 });
+  }, undefined, "medium")).rejects.toHaveProperty("name", "AbortError");
+  expect(posts).toBe(1);
+});
+
 test("rejects stale and cloud-backed aliases before sending prompts", async () => {
   let chatRequests = 0;
   const run = runOllama(

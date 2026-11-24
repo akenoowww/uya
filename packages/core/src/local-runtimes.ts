@@ -1,5 +1,6 @@
-import type { ConversationMessage } from "@ide/protocol";
+import type { ConversationMessage, EffortLevel } from "@ide/protocol";
 import { fetchLoopback, type LoopbackFetch } from "./loopback-http";
+import { normalizeEffortLevel } from "./provider-adapter";
 
 const ports = {
   llamacpp: [9931, 8080],
@@ -21,6 +22,15 @@ type LocalEndpoint = { origin: string; models: string[] };
 const DISCOVERY_TIMEOUT_MS = 2_000;
 const MAX_RESPONSE_CHARS = 1_048_576;
 const MLX_PROBE_PATH = "/v1/models/uya/model-discovery-probe-7c284a";
+
+const reasoningLevels = {
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "high",
+  max: "high",
+} as const satisfies Record<EffortLevel, "low" | "medium" | "high">;
 
 export function isLocalRuntimeId(id: string): id is LocalRuntimeId {
   return Object.hasOwn(ports, id);
@@ -217,6 +227,7 @@ export async function runLocalRuntime(
   signal: AbortSignal,
   output: Output,
   fetchRuntime: FetchRuntime = fetchLoopback,
+  effort?: EffortLevel,
 ): Promise<Usage> {
   signal.throwIfAborted();
   const endpoints = await discoverEndpoints(id, AbortSignal.any([signal, AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)]), fetchRuntime);
@@ -224,6 +235,7 @@ export async function runLocalRuntime(
   const endpoint = endpoints.find(({ models }) => models.includes(model));
   if (!endpoint) throw new Error("The selected model is unavailable from the local runtime.");
 
+  const level = normalizeEffortLevel(effort);
   const path = "/v1/chat/completions" + (id === "llamacpp" ? "?autoload=false" : "");
   const response = await fetchRuntime(endpoint.origin + path, {
     method: "POST",
@@ -234,6 +246,7 @@ export async function runLocalRuntime(
       messages: typeof messages === "string" ? [{ role: "user", content: messages }] : messages,
       stream: true,
       stream_options: { include_usage: true },
+      reasoning_effort: level ? reasoningLevels[level] : undefined,
     }),
   });
   if (!response.ok || response.redirected || !response.body) {

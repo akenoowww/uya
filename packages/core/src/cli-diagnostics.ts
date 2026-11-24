@@ -2,11 +2,11 @@ const CAPTURE_CHARS = 8 * 1024;
 
 const cliFlags = [
   "--agent", "--ask-for-approval", "--disable", "--disable-slash-commands", "--disallowedTools",
-  "--ephemeral", "--format", "--ignore-rules", "--ignore-user-config", "--include-partial-messages",
+  "--effort", "--ephemeral", "--format", "--ignore-rules", "--ignore-user-config", "--include-partial-messages",
   "--input-format", "--json", "--max-tool-calls", "--mcp-config", "--model",
   "--no-chrome", "--no-session-persistence", "--output-format", "--pure", "--safe-mode",
   "--sandbox", "--setting-sources", "--settings", "--skip-git-repo-check",
-  "--strict-mcp-config", "--thinking", "--tools", "--verbose",
+  "--strict-mcp-config", "--thinking", "--tools", "--variant", "--verbose",
 ];
 
 const diagnoses = [

@@ -1,4 +1,10 @@
-import type { ConversationMessage, Provider } from "@ide/protocol";
+import type { ConversationMessage, EffortLevel, Provider } from "@ide/protocol";
+
+export const effortLevels = ["minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly EffortLevel[];
+
+export function normalizeEffortLevel(value: unknown): EffortLevel | undefined {
+  return effortLevels.find((level) => level === value);
+}
 
 export interface Usage {
   inputTokens?: number;
@@ -15,6 +21,7 @@ export interface AdapterRequest {
   provider: Provider;
   prompt: string;
   model?: string;
+  effort?: EffortLevel;
   signal: AbortSignal;
   output: AdapterOutput;
   messages?: readonly ConversationMessage[];

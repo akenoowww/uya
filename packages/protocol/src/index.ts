@@ -1,3 +1,5 @@
+export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface Provider {
   id: string;
   name: string;
@@ -11,6 +13,9 @@ export interface Provider {
   structuredArgs?: string[];
   models?: string[];
   defaultModel?: string;
+  supportedEfforts?: EffortLevel[];
+  defaultEffort?: EffortLevel;
+  modelEfforts?: Record<string, EffortLevel[]>;
   detail?: string;
 }
 
@@ -40,6 +45,7 @@ export interface RunInput {
   workspacePath?: string | null;
   providerId?: string;
   model?: string;
+  effort?: EffortLevel;
   prompt: string;
   contextPaths?: string[];
   selection?: EditorSelection;
@@ -57,6 +63,7 @@ export interface RunSummary {
   providerId: string;
   providerName?: string;
   model?: string;
+  effort?: EffortLevel;
   prompt: string;
   status: RunStatus;
   startedAt: number;
@@ -121,6 +128,7 @@ export interface PromptDocument extends PromptSummary {
   body: string;
   variables: PromptVariable[];
   providerId?: string;
+  effort?: EffortLevel;
   mode?: RoutingMode;
 }
 
@@ -128,6 +136,7 @@ export interface RenderedPrompt {
   text: string;
   revision: string;
   providerId?: string;
+  effort?: EffortLevel;
   mode?: RoutingMode;
 }
 

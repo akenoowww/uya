@@ -66,27 +66,29 @@ test("preserves startup errors and avoids classifying messages created by concat
 
 test("structured CLI failures surface a safe diagnostic after draining the actual stderr pipe", async () => {
   const directory = await mkdtemp(join(tmpdir(), "uya-diagnostic-test-"));
-  const command = join(directory, "codex-fixture");
+  const command = join(directory, "claude-fixture");
   const syntheticMarker = "fixture-value-that-must-stay-private";
   try {
     await writeFile(command, `#!/bin/sh
+case " $* " in *" --effort medium "*) ;; *) exit 3;; esac
 /bin/cat >/dev/null
 /bin/dd if=/dev/zero bs=65536 count=16 >&2 2>/dev/null
-printf '%s\\n' "error: unexpected argument '--ignore-user-config' found" >&2
+printf '%s\\n' "error: unknown option '--effort'" >&2
 printf '%s\\n' '${syntheticMarker}' >&2
 exit 2
 `, { mode: 0o700 });
 
     const raw: string[] = [];
     const agent = new ProviderRegistry().run({
-      provider: { id: "codex", name: "Codex fixture", command, kind: "cli", available: true, terminal: true, structured: true },
+      provider: { id: "claude", name: "Claude fixture", command, kind: "cli", available: true, terminal: true, structured: true },
       prompt: "synthetic prompt",
+      effort: "medium",
       signal: AbortSignal.timeout(3_000),
       output: { emit() {}, raw: (line) => raw.push(line) },
     });
     const error = await agent.catch((error: unknown) => error);
     expect(error).toMatchObject({
-      message: "The CLI rejected --ignore-user-config. Update the CLI to a compatible version or run it in Terminal.",
+      message: "The CLI rejected --effort. Update the CLI to a compatible version or run it in Terminal.",
       exitCode: 2,
     });
     expect((error as Error).message).not.toContain(syntheticMarker);

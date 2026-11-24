@@ -1,10 +1,20 @@
-import type { ConversationMessage } from "@ide/protocol";
+import type { ConversationMessage, EffortLevel } from "@ide/protocol";
 import { fetchLoopback, type LoopbackFetch } from "./loopback-http";
+import { normalizeEffortLevel } from "./provider-adapter";
 
 const OLLAMA_URL = "http://127.0.0.1:11434";
 const DISCOVERY_TIMEOUT_MS = 2_000;
 const GENERATION_TIMEOUT_MS = 300_000;
 const MAX_RECORD_LENGTH = 1_048_576;
+
+const thinkingLevels = {
+  minimal: false,
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "high",
+  max: "high",
+} as const satisfies Record<EffortLevel, boolean | string>;
 
 type Usage = {
   inputTokens?: number;
@@ -143,6 +153,7 @@ export async function runOllama(
   onRaw: (line: string) => void,
   fetchOllama: LoopbackFetch = fetchLoopback,
   onThinking?: (delta: string) => void,
+  effort?: EffortLevel,
 ): Promise<Usage> {
   const runSignal = AbortSignal.any([signal, AbortSignal.timeout(GENERATION_TIMEOUT_MS)]);
   runSignal.throwIfAborted();
@@ -158,18 +169,26 @@ export async function runOllama(
   }
   if (!models.includes(model)) throw new Error("The selected model is unavailable as a local Ollama model");
 
-  let response: Response;
-  try {
-    response = await fetchOllama(`${OLLAMA_URL}/api/chat`, {
+  const level = normalizeEffortLevel(effort);
+  const think = level ? thinkingLevels[level] : undefined;
+  const messages = typeof prompt === "string" ? [{ role: "user", content: prompt }] : prompt;
+  const postChat = (thinking?: typeof think) => {
+    runSignal.throwIfAborted();
+    return fetchOllama(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: runSignal,
-      body: JSON.stringify({
-        model,
-        messages: typeof prompt === "string" ? [{ role: "user", content: prompt }] : prompt,
-        stream: true,
-      }),
+      body: JSON.stringify({ model, messages, stream: true, think: thinking }),
     });
+  };
+  let response: Response;
+  try {
+    response = await postChat(think);
+    if (response.status === 400 && think !== undefined) {
+      // Older servers and models may reject the parameter or a named level.
+      await response.body?.cancel().catch(() => undefined);
+      response = await postChat();
+    }
   } catch {
     runSignal.throwIfAborted();
     throw new Error("Cannot connect to the local Ollama service");

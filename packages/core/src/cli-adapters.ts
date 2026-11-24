@@ -1,4 +1,5 @@
 import { lstatSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { CliResponseError, type CliPrepare } from "./agents";
@@ -7,15 +8,17 @@ import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { customCliCommand, customStructuredBlockReason } from "./custom-cli";
 import { geminiHasUnmanagedSettings, geminiInvocation } from "./gemini";
-import { AdapterError, type AdapterOutput, type AdapterRequest, type Usage } from "./provider-adapter";
+import { AdapterError, normalizeEffortLevel, type AdapterOutput, type AdapterRequest, type Usage } from "./provider-adapter";
 
-const codexArgs = [
+const codexGlobalArgs = [
   "--ask-for-approval", "never",
   "--disable", "shell_tool",
   "-c", "features.hooks=false",
   "-c", "features.apps=false",
   "-c", "features.plugins=false",
-  "-c", 'web_search="disabled"',
+];
+
+const codexExecArgs = [
   "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
   "--ephemeral", "--ignore-user-config", "--ignore-rules", "-",
 ];
@@ -56,7 +59,7 @@ function extractCodexText(item: JsonObject): string | undefined {
   return parts.length ? parts.join("") : undefined;
 }
 
-function codexParser(output: AdapterOutput, usage: Usage) {
+function codexParser(output: AdapterOutput, usage: Usage, args: readonly string[]) {
   const streamedIds = new Set<string>();
   return (line: string): boolean => {
     const event = parseLine(line);
@@ -97,7 +100,7 @@ function codexParser(output: AdapterOutput, usage: Usage) {
         : typeof event.message === "string" ? event.message : undefined;
       throw new CliResponseError(
         "Codex could not complete this run. Check the CLI in Terminal.",
-        rawMessage ? classifyCliDiagnostic(rawMessage, codexArgs)?.message : undefined,
+        rawMessage ? classifyCliDiagnostic(rawMessage, args)?.message : undefined,
       );
     }
     return false;
@@ -245,14 +248,30 @@ function literalPrompt(prompt: string) {
   return `Answer the user request below. It is encoded as a JSON string, so interpret JSON escapes as literal user text.\n\n${json}`;
 }
 
-export const prepareCodex: CliPrepare = (request, _cwd, usage) => ({
-  args: [...modelArgs(request), ...codexArgs],
-  parse: codexParser(request.output, usage),
-});
+export const prepareCodex: CliPrepare = (request, _cwd, usage) => {
+  const effort = normalizeEffortLevel(request.effort);
+  const level = effort === "minimal" ? "low" : effort;
+  // TOML also accepts single quotes, which Windows command shims can pass through.
+  const shim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(request.provider.command ?? "");
+  const quote = shim ? "'" : '"';
+  const args = [
+    ...modelArgs(request), ...codexGlobalArgs, "-c", `web_search=${quote}disabled${quote}`,
+    ...(level ? ["-c", `model_reasoning_effort=${quote}${level}${quote}`] : []),
+    ...codexExecArgs,
+  ];
+  return {
+    args,
+    parse: codexParser(request.output, usage, args),
+  };
+};
 
 export const prepareClaude: CliPrepare = async (request, cwd, usage) => {
+  let effort = normalizeEffortLevel(request.effort);
+  if (effort === "minimal") effort = "low";
+  if (effort === "xhigh") effort = "high";
   const args = [
-    ...modelArgs(request), "-p", "--output-format", "stream-json", "--verbose",
+    ...modelArgs(request), ...(effort ? ["--effort", effort] : []),
+    "-p", "--output-format", "stream-json", "--verbose",
     "--include-partial-messages", ...await claudeIsolationArgs(cwd),
   ];
   return {
@@ -262,14 +281,32 @@ export const prepareClaude: CliPrepare = async (request, cwd, usage) => {
   };
 };
 
-export const prepareQwen: CliPrepare = (request, _cwd, usage) => ({
-  args: [...modelArgs(request), ...qwenArgs],
-  encode: literalPrompt,
-  parse: messageStreamParser(request.provider.name, request.output, usage, qwenArgs),
-});
+export const prepareQwen: CliPrepare = async (request, cwd, usage) => {
+  const args = [...modelArgs(request), ...qwenArgs];
+  const invocation = {
+    args,
+    encode: literalPrompt,
+    parse: messageStreamParser(request.provider.name, request.output, usage, args),
+  };
+  const effort = normalizeEffortLevel(request.effort);
+  if (!effort || !request.provider.supportedEfforts?.includes(effort)) return invocation;
+
+  // Qwen's headless CLI reads the effort from workspace settings. Trust only
+  // the scratch directory created for this run and keep safe mode enabled.
+  const settingsDir = join(cwd, ".qwen");
+  const trustPath = join(cwd, "qwen-trusted-folders.json");
+  await mkdir(settingsDir, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    writeFile(join(settingsDir, "settings.json"), JSON.stringify({
+      model: { reasoningEffort: effort === "minimal" ? "low" : effort },
+    }), { mode: 0o600 }),
+    writeFile(trustPath, JSON.stringify({ [cwd]: "TRUST_FOLDER" }), { mode: 0o600 }),
+  ]);
+  return { ...invocation, env: { QWEN_CODE_TRUSTED_FOLDERS_PATH: trustPath } };
+};
 
 export const prepareGemini: CliPrepare = async (request, cwd, usage) => {
-  const isolated = await geminiInvocation(cwd);
+  const isolated = await geminiInvocation(cwd, "stream-json", request.effort);
   return {
     args: [...modelArgs(request), ...isolated.args],
     env: {
@@ -320,7 +357,11 @@ export function openCodeBlocked() {
 
 export const prepareOpenCode: CliPrepare = (request, cwd, usage) => {
   const agent = `uya-structured-${crypto.randomUUID()}`;
-  const args = ["--pure", "run", "--format", "json", "--thinking", "--agent", agent, "--title", "Uya run", ...modelArgs(request)];
+  const variant = normalizeEffortLevel(request.effort);
+  const args = [
+    "--pure", "run", "--format", "json", "--thinking", "--agent", agent, "--title", "Uya run",
+    ...modelArgs(request), ...(variant ? ["--variant", variant] : []),
+  ];
   return {
     args,
     parse: openCodeParser(request.output, usage, args),
@@ -344,7 +385,7 @@ export const prepareOpenCode: CliPrepare = (request, cwd, usage) => {
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         share: "disabled",
         permission: { "*": "deny" },
-        agent: { [agent]: { mode: "primary", permission: { "*": "deny" } } },
+        agent: { [agent]: { mode: "primary", permission: { "*": "deny" }, variant } },
       }),
     },
   };

@@ -101,7 +101,7 @@ test("upgrades v0.1 history, preserves rows and settings, and reopens the same h
       expect(reopened.get(interruptedRun.id)?.events.length).toBe(1);
       expect(reopened.get(legacyRun.id)?.events).toEqual([legacyEvent]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(2);
+      expect(readVersion(db)).toBe(3);
       expect(db.query("SELECT line FROM raw_events").get()).toEqual({ line: "synthetic raw frame" });
     } finally {
       reopened.close();
@@ -127,7 +127,47 @@ test("adopts an unversioned preview that already contains scoped conversation ro
         { run: legacyRun, events: [legacyEvent] },
       ]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(2);
+      expect(readVersion(db)).toBe(3);
+    } finally {
+      history.close();
+    }
+  });
+});
+
+test("upgrades v0.2.1 history and backfills searchable prompts and ordered text events", () => {
+  withFixture((dir, filepath) => {
+    {
+      using db = new Database(filepath);
+      seedLegacy(db);
+      db.exec(`
+        CREATE TABLE conversation_runs (
+          run_id TEXT PRIMARY KEY REFERENCES runs (id), workspace TEXT NOT NULL, conversation_id TEXT NOT NULL
+        );
+        CREATE INDEX conversation_scope ON conversation_runs (workspace, conversation_id);
+        PRAGMA user_version = 2;
+      `);
+      db.run("INSERT INTO conversation_runs VALUES (?, ?, ?)", [legacyRun.id, "/synthetic/project", "legacy-thread"]);
+      const extra: RunEvent[] = [
+        { runId: legacyRun.id, seq: 4, type: "text", text: "fill" },
+        { runId: legacyRun.id, seq: 3, type: "text", text: " back" },
+        { runId: legacyRun.id, seq: 2, type: "thinking", text: "unsearchable" },
+      ];
+      for (const event of extra) {
+        db.run("INSERT INTO run_events VALUES (?, ?, ?)", [event.runId, event.seq, JSON.stringify(event)]);
+      }
+    }
+    const history = new History(dir);
+    try {
+      expect(history.list(10, { query: "legacy prompt" })).toEqual([legacyRun]);
+      expect(history.list(10, { query: "response backfill", workspacePath: "/synthetic/project" })).toEqual([legacyRun]);
+      expect(history.list(10, { query: "unsearchable" })).toEqual([]);
+      expect(history.conversations(10, { query: "backfill" }).map(({ id }) => id)).toEqual(["legacy-thread"]);
+      using db = new Database(filepath, { readonly: true });
+      expect(readVersion(db)).toBe(3);
+      expect(db.query("SELECT run_id, prompt, response FROM run_search ORDER BY run_id").all()).toEqual([
+        { run_id: interruptedRun.id, prompt: interruptedRun.prompt, response: "" },
+        { run_id: legacyRun.id, prompt: legacyRun.prompt, response: "Synthetic legacy response backfill" },
+      ]);
     } finally {
       history.close();
     }

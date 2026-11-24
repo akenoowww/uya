@@ -40,6 +40,23 @@ const migrations = [
     CREATE INDEX IF NOT EXISTS conversation_scope ON conversation_runs (workspace, conversation_id);
     SELECT run_id, workspace, conversation_id FROM conversation_runs LIMIT 0;
   `,
+  `
+    CREATE TABLE IF NOT EXISTS broadcast_runs (
+      run_id TEXT PRIMARY KEY REFERENCES runs (id),
+      group_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS broadcast_group_idx ON broadcast_runs (group_id);
+    CREATE VIRTUAL TABLE IF NOT EXISTS run_search USING fts5(run_id UNINDEXED, prompt, response);
+    DELETE FROM run_search;
+    INSERT INTO run_search (run_id, prompt, response)
+    SELECT r.id, COALESCE(json_extract(r.value, '$.prompt'), ''), COALESCE((
+      SELECT group_concat(text, '') FROM (
+        SELECT json_extract(e.value, '$.text') AS text FROM run_events AS e
+        WHERE e.run_id = r.id AND json_extract(e.value, '$.type') = 'text'
+        ORDER BY e.seq
+      )
+    ), '') FROM runs AS r;
+  `,
 ] as const;
 
 const errorMessages = {

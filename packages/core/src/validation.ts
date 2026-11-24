@@ -37,6 +37,22 @@ const providerId = text("Provider ID", 100);
 const runId = text("Run ID", 100);
 const conversationId = text("Conversation ID", 100)
   .regex(/^[A-Za-z0-9_-]+$/, { error: "Invalid conversation ID." });
+const broadcastGroupId = text("Broadcast group ID", 100)
+  .regex(/^[A-Za-z0-9_-]+$/, { error: "Invalid broadcast group ID." });
+const effortLevel = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"], { error: "Unknown effort level." });
+const attachmentByteLimit = 128 * 1024;
+const attachments = boundedArray(z.object({
+  path: filePath,
+  text: text("Attachment text", attachmentByteLimit, true).refine(
+    (value) => Buffer.byteLength(value) <= attachmentByteLimit,
+    { error: "Each attachment is limited to 128 KiB." },
+  ),
+}, { error: "Each attachment must be an object." }), 10, "Attach up to 10 files.");
+const historyList = z.object({
+  limit: integer("Result limit", 1, 200).optional(),
+  query: text("Search query", 512, true).optional(),
+  workspacePath: projectPath.nullable().optional(),
+});
 
 const customProvider = z.object({
   name: text("Display name", 100).trim(),
@@ -49,13 +65,17 @@ const customProvider = z.object({
 
 const runInput = z.object({
   conversationId: conversationId.optional(),
+  broadcastGroupId: broadcastGroupId.optional(),
   workspacePath: projectPath.nullable().optional(),
   providerId: providerId.optional(),
   model: text("Model", 256).refine((value) => !value.startsWith("-") && !/[\x00-\x1f\x7f]/.test(value), {
     error: "Invalid model name.",
   }).optional(),
+  effort: effortLevel.optional(),
   prompt: text("Prompt", 256_000),
   contextPaths: boundedArray(filePath, 20, "Select up to 20 context files.").optional(),
+  attachments: attachments.optional(),
+  includeProjectRules: z.boolean({ error: "Include project rules must be a boolean." }).optional(),
   mode: z.enum(["manual", "rule", "fallback"], { error: "Unknown routing mode." })
     .nullish().transform((value) => value ?? "manual"),
   fallbackIds: boundedArray(providerId, 8, "Select up to 8 fallback providers.").optional(),
@@ -98,8 +118,13 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "providers.remove": z.object({ id: providerId }),
   "runs.start": runInput,
   "runs.get": z.object({ id: runId }),
-  "runs.list": z.object({ limit: integer("Result limit", 1, 200).optional() }),
+  "runs.list": historyList,
   "runs.conversation": z.object({ id: conversationId, workspacePath: projectPath.nullable() }),
+  "runs.conversations": historyList,
+  "runs.fork": z.object({ conversationId, workspacePath: projectPath.nullable(), upToRunId: runId.optional() }),
+  "runs.delete": z.object({ id: runId }),
+  "runs.deleteConversation": z.object({ id: conversationId, workspacePath: projectPath.nullable() }),
+  "runs.usage": z.object({ days: integer("Usage window in days", 1, Number.MAX_SAFE_INTEGER).optional() }),
   "runs.cancel": z.object({ id: runId }),
   "runs.getRules": z.object({}),
   "runs.setRules": z.object({ rules: boundedArray(routingRule, 50, "Set up to 50 routing rules.") }),

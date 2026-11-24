@@ -51,11 +51,32 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       if (!run) throw new RpcError(-32004, "Run not found.");
       return run;
     },
-    "runs.list": ({ limit = 30 }) => history.list(limit),
+    "runs.list": ({ limit = 30, ...options }) => {
+      if (options.workspacePath !== undefined) checkWorkspace(options.workspacePath);
+      return history.list(limit, options);
+    },
     "runs.conversation": ({ id, workspacePath: requestedPath }) => {
       checkWorkspace(requestedPath);
       return history.conversation(id, workspace.path, CONVERSATION_HISTORY_LIMIT);
     },
+    "runs.conversations": ({ limit = 30, ...options }) => {
+      if (options.workspacePath !== undefined) checkWorkspace(options.workspacePath);
+      return history.conversations(limit, options);
+    },
+    "runs.fork": ({ conversationId, upToRunId, workspacePath: requestedPath }) => {
+      checkWorkspace(requestedPath);
+      return history.forkConversation(conversationId, workspace.path, upToRunId);
+    },
+    "runs.delete": async ({ id }) => {
+      if (!(await runs.deleteRun(id))) throw new RpcError(-32004, "Run not found.");
+      return null;
+    },
+    "runs.deleteConversation": async ({ id, workspacePath: requestedPath }) => {
+      checkWorkspace(requestedPath);
+      if (!(await runs.deleteConversation(id, workspace.path))) throw new RpcError(-32004, "Conversation not found.");
+      return null;
+    },
+    "runs.usage": ({ days }) => history.usage(days),
     "runs.cancel": ({ id }) => {
       runs.cancel(id);
       return null;

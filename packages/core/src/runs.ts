@@ -1,5 +1,5 @@
 import { extname } from "node:path";
-import type { ConversationMessage, Provider, RunEvent, RunInput, RunSummary } from "@ide/protocol";
+import type { ConversationMessage, Provider, RunEvent, RunInput, RunSummary, TextContext } from "@ide/protocol";
 import { CONVERSATION_HISTORY_LIMIT, conversationMessages } from "./conversation";
 import { History, type RunEventPayload } from "./history";
 import { AdapterError, type AdapterOutput } from "./provider-adapter";
@@ -13,9 +13,7 @@ const MAX_TEXT_CHARS = 1_000_000;
 const MAX_RAW_CHARS = 2_000_000;
 const ATTEMPT_TIMEOUT_MS = 180_000;
 
-type Context = { path: string; text: string };
-
-function promptWithContext(prompt: string, context: Context[]): string {
+function promptWithContext(prompt: string, context: TextContext[]): string {
   if (!context.length) return prompt;
   return [
     prompt,
@@ -28,7 +26,12 @@ function extension(path: string): string {
   return extname(path).slice(1).toLowerCase();
 }
 
-type ActiveRun = { controller: AbortController; done: Promise<void> };
+type ActiveRun = {
+  controller: AbortController;
+  done: Promise<void>;
+  conversationId?: string;
+  workspace?: string;
+};
 
 export class Runs {
   private readonly active = new Map<string, ActiveRun>();
@@ -46,8 +49,13 @@ export class Runs {
     if (input.workspacePath !== undefined && input.workspacePath !== (cwd ?? null)) {
       throw new RpcError(-32009, "The workspace changed. Reopen the project and try again.");
     }
-    const context = await this.workspace.context(input.contextPaths ?? []);
-    if (input.selection) context.push(await this.workspace.validateSelection(input.selection));
+    const [rules, files, selection] = await Promise.all([
+      input.includeProjectRules ? this.workspace.readProjectRulesContext() : [],
+      this.workspace.context(input.contextPaths ?? []),
+      input.selection ? this.workspace.validateSelection(input.selection) : undefined,
+    ]);
+    const context = [...rules, ...files, ...(input.attachments ?? [])];
+    if (selection) context.push(selection);
     if (cwd !== this.workspace.path) {
       throw new RpcError(-32009, "The workspace changed while preparing the run. Try again.");
     }
@@ -94,9 +102,11 @@ export class Runs {
     const run: RunSummary = {
       id: crypto.randomUUID(),
       conversationId: input.conversationId,
+      broadcastGroupId: input.broadcastGroupId,
       providerId: first.id,
       providerName: first.name,
       model: selectedModel ?? (first.kind === "runtime" ? first.models?.[0] : undefined),
+      effort: input.effort,
       prompt: input.prompt,
       promptVersion: input.promptVersion,
       status: "running",
@@ -112,13 +122,32 @@ export class Runs {
           } });
         }
       }).finally(() => this.active.delete(run.id));
-    this.active.set(run.id, { controller, done });
+    this.active.set(run.id, { controller, done, conversationId: run.conversationId, workspace: cwd });
     return run;
   }
 
   cancel(id: string) {
     if (!this.history.summary(id)) throw new RpcError(-32004, "Run not found.");
     this.active.get(id)?.controller.abort();
+  }
+
+  async deleteRun(id: string): Promise<boolean> {
+    const active = this.active.get(id);
+    if (active) {
+      active.controller.abort();
+      await active.done;
+    }
+    return this.history.deleteRun(id);
+  }
+
+  async deleteConversation(id: string, workspace: string | undefined): Promise<boolean> {
+    // A new turn can start while cancellation settles. Drain it before deleting the thread.
+    for (;;) {
+      const active = [...this.active.values()].find((run) => run.conversationId === id && run.workspace === workspace);
+      if (!active) return this.history.deleteConversation(id, workspace);
+      active.controller.abort();
+      await active.done;
+    }
   }
 
   async shutdown() {
@@ -177,7 +206,9 @@ export class Runs {
       };
 
       try {
-        const usage = await this.providers.run({ provider, prompt, model: run.model, signal: attempt, output, messages });
+        const usage = await this.providers.run({
+          provider, prompt, model: run.model, effort: run.effort, signal: attempt, output, messages,
+        });
         signal.throwIfAborted();
         const { model: resolvedModel, ...tokenUsage } = usage;
         this.event(run.id, { type: "status", run: {

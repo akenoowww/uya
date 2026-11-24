@@ -7,7 +7,11 @@ import { geminiBlocked, prepareOpenCode } from "./cli-adapters";
 import type { AdapterRequest } from "./provider-adapter";
 import { ProviderRegistry } from "./provider-registry";
 
-const registry = new ProviderRegistry(async () => ["ollama-fixture"], async (id) => [`${id}-fixture`]);
+const registry = new ProviderRegistry(
+  async () => ["ollama-fixture"],
+  async (id) => [`${id}-fixture`],
+  async (id) => ({ models: [`${id}-cli-model`], defaultModel: `${id}-cli-model` }),
+);
 
 async function runFixture(id: string, script: string, run = (request: AdapterRequest) => registry.run(request)) {
   const fixture = await mkdtemp(join(tmpdir(), "uya-adapter-fixture-"));
@@ -161,6 +165,83 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_toke
     expect(events).toEqual([["text", "Hello "], ["text", "world"], ["text", "!"]]);
     expect(usage).toEqual({ inputTokens: 10, outputTokens: 3 });
   } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("registry keeps refreshed models when an older probe finishes later", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-registry-cache-"));
+  const previousPath = process.env.PATH;
+  try {
+    await writeFile(join(fixture, "qwen"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    process.env.PATH = fixture;
+    const calls: { id: string; command?: string; refresh?: boolean }[] = [];
+    let finishInitial!: () => void;
+    const initialProbe = new Promise<void>((resolve) => { finishInitial = resolve; });
+    const cachedRegistry = new ProviderRegistry(
+      async () => [],
+      async () => [],
+      async (id, options) => {
+        calls.push({ id, command: options?.command, refresh: options?.refresh });
+        const model = options?.refresh ? "qwen-v2" : "qwen-v1";
+        if (!options?.refresh) await initialProbe;
+        return { models: [model], defaultModel: model };
+      },
+    );
+
+    const initial = cachedRegistry.discover();
+    const refreshed = (await cachedRegistry.discover(true)).find((entry) => entry.id === "qwen");
+    finishInitial();
+    expect((await initial).find((entry) => entry.id === "qwen")?.models).toEqual(["qwen-v1"]);
+    expect(refreshed?.models).toEqual(["qwen-v2"]);
+    const cached = (await cachedRegistry.discover()).find((entry) => entry.id === "qwen");
+    expect(cached?.models).toEqual(["qwen-v2"]);
+    expect(calls).toEqual([
+      { id: "qwen", command: join(fixture, "qwen"), refresh: false },
+      { id: "qwen", command: join(fixture, "qwen"), refresh: true },
+    ]);
+  } finally {
+    process.env.PATH = previousPath;
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("registry leaves managed and terminal-only providers in the terminal without probing models", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-registry-managed-"));
+  const previousPath = process.env.PATH;
+  const previousGeminiSettings = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
+  const previousOpenCodeSettings = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR;
+  try {
+    for (const id of ["gemini", "opencode", "kimi"]) {
+      await writeFile(join(fixture, id), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    }
+    process.env.PATH = fixture;
+    process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = join(fixture, "gemini-settings.json");
+    process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = join(fixture, "opencode-settings");
+    const calls: string[] = [];
+    const managedRegistry = new ProviderRegistry(
+      async () => [],
+      async () => [],
+      async (id) => {
+        calls.push(id);
+        return { models: ["fixture-model"] };
+      },
+    );
+    for (const refresh of [false, true]) {
+      const sources = await managedRegistry.discover(refresh);
+      for (const id of ["gemini", "opencode", "kimi"]) {
+        const provider = sources.find((entry) => entry.id === id);
+        expect(provider).toMatchObject({ available: true, terminal: true, structured: false });
+        expect(provider?.models).toBeUndefined();
+      }
+    }
+    expect(calls).toEqual([]);
+  } finally {
+    process.env.PATH = previousPath;
+    if (previousGeminiSettings === undefined) delete process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
+    else process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = previousGeminiSettings;
+    if (previousOpenCodeSettings === undefined) delete process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR;
+    else process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = previousOpenCodeSettings;
     await rm(fixture, { recursive: true, force: true });
   }
 });

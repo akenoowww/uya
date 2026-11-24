@@ -2,10 +2,10 @@ import { lstatSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export function geminiHasUnmanagedSettings(): boolean {
-  if (process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH) return false;
+export function geminiHasUnmanagedSettings(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.GEMINI_CLI_SYSTEM_SETTINGS_PATH) return false;
   const path = process.platform === "darwin" ? "/Library/Application Support/GeminiCli/settings.json"
-    : process.platform === "win32" ? join(process.env.ProgramData || "C:\\ProgramData", "gemini-cli", "settings.json")
+    : process.platform === "win32" ? join(env.ProgramData || "C:\\ProgramData", "gemini-cli", "settings.json")
     : process.platform === "linux" ? "/etc/gemini-cli/settings.json" : undefined;
   if (!path) return false;
   try {
@@ -16,7 +16,7 @@ export function geminiHasUnmanagedSettings(): boolean {
   }
 }
 
-export async function geminiInvocation(directory: string) {
+export async function geminiInvocation(directory: string, protocol: "stream-json" | "acp" = "stream-json") {
   const settingsPath = join(directory, "settings.json");
   const policyPath = join(directory, "uya-read-only.toml");
   const disabledName = `uya-disabled-${crypto.randomUUID()}`;
@@ -40,7 +40,8 @@ export async function geminiInvocation(directory: string) {
     settingsPath,
     args: [
       "--extensions", "none", "--allowed-mcp-server-names", disabledName,
-      "--policy", policyPath, "--approval-mode", "default", "--output-format", "stream-json",
+      "--policy", policyPath, "--approval-mode", "default",
+      ...(protocol === "acp" ? ["--acp"] : ["--output-format", "stream-json"]),
     ],
   };
 }

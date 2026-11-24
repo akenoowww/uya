@@ -124,6 +124,7 @@ function ChatTool({ id }: { id: string }) {
       onCancel={core.cancelRun}
       onNewConversation={() => dock.newConversation(id)}
       onOpenProviders={openProviders}
+      onRefreshProviders={core.refreshProviders}
     />
   );
 }

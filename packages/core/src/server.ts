@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { RpcMethod, RpcParams, RpcResult, RunEvent } from "@ide/protocol";
 import { CONVERSATION_HISTORY_LIMIT } from "./conversation";
+import type { CliModelDiscoverer } from "./cli-models";
 import { History } from "./history";
 import type { LocalRuntimeId } from "./local-runtimes";
 import { Providers } from "./providers";
@@ -121,6 +122,7 @@ interface ServerOptions {
   globalPromptsDir?: string;
   discoverRuntimeModels?: () => Promise<string[]>;
   discoverLocalRuntimeModels?: (id: LocalRuntimeId) => Promise<string[]>;
+  discoverCliModels?: CliModelDiscoverer;
 }
 
 export function startServer(options: ServerOptions) {
@@ -134,7 +136,12 @@ export function startServer(options: ServerOptions) {
 
   const history = new History(options.dataDir);
   const workspace = new Workspace({ globalPromptsDir: options.globalPromptsDir });
-  const providers = new Providers(history, options.discoverRuntimeModels, options.discoverLocalRuntimeModels);
+  const providers = new Providers(
+    history,
+    options.discoverRuntimeModels,
+    options.discoverLocalRuntimeModels,
+    options.discoverCliModels,
+  );
   const listeners = new Map<string, Set<Socket>>();
 
   function deliver(socket: Socket, event: RunEvent) {

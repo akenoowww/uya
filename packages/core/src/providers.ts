@@ -1,4 +1,5 @@
 import type { CustomProviderInput, Provider } from "@ide/protocol";
+import type { CliModelDiscoverer } from "./cli-models";
 import type { History } from "./history";
 import type { LocalRuntimeId } from "./local-runtimes";
 import type { AdapterRequest, Usage } from "./provider-adapter";
@@ -7,15 +8,16 @@ import { RpcError } from "./validation";
 
 export class Providers {
   private cached: { value: Provider[]; until: number } | undefined;
-  private discovering: Promise<Provider[]> | undefined;
+  private discovering: { refresh: boolean; promise: Promise<Provider[]> } | undefined;
   private readonly registry: ProviderRegistry;
 
   constructor(
     private readonly history: History,
     discoverOllama?: () => Promise<string[]>,
     discoverLocal?: (id: LocalRuntimeId) => Promise<string[]>,
+    discoverCli?: CliModelDiscoverer,
   ) {
-    this.registry = new ProviderRegistry(discoverOllama, discoverLocal);
+    this.registry = new ProviderRegistry(discoverOllama, discoverLocal, discoverCli);
   }
 
   async list(refresh = false): Promise<Provider[]> {
@@ -65,12 +67,16 @@ export class Providers {
 
   private builtins(refresh: boolean): Promise<Provider[]> {
     if (!refresh && this.cached && this.cached.until > Date.now()) return Promise.resolve(this.cached.value);
-    this.discovering ??= this.registry.discover().then((value) => {
-      this.cached = { value, until: Date.now() + 15_000 };
+    if (this.discovering && (this.discovering.refresh || !refresh)) return this.discovering.promise;
+    const promise = this.registry.discover(refresh).then((value) => {
+      if (this.discovering?.promise === promise) {
+        this.cached = { value, until: Date.now() + 15_000 };
+      }
       return value;
     }).finally(() => {
-      this.discovering = undefined;
+      if (this.discovering?.promise === promise) this.discovering = undefined;
     });
-    return this.discovering;
+    this.discovering = { refresh, promise };
+    return promise;
   }
 }

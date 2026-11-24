@@ -59,6 +59,7 @@ const options = {
   globalPromptsDir: join(fixture, "prompts"),
   discoverRuntimeModels: async () => [],
   discoverLocalRuntimeModels: async () => [],
+  discoverCliModels: async () => ({ models: [] }),
 };
 let server: ReturnType<typeof startServer> | undefined;
 

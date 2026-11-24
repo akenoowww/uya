@@ -15,6 +15,76 @@ test("accepts existing RPC defaults and strips unexpected fields", () => {
   });
 });
 
+test("accepts effort, broadcast IDs, attachments, and project rules in runs.start", () => {
+  const params = {
+    prompt: "fixture",
+    broadcastGroupId: "group_123-abc",
+    includeProjectRules: false,
+    attachments: [{ path: "fixture.txt", text: "😀".repeat(32_768) }],
+  };
+  for (const effort of ["minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+    expect(parseRpcParams("runs.start", { ...params, effort })).toEqual({ ...params, effort, mode: "manual" });
+  }
+  const invalid = [
+    { effort: "maximum" },
+    { broadcastGroupId: "group/123" },
+    { includeProjectRules: "true" },
+    { attachments: Array(11).fill({ path: "fixture.txt", text: "fixture" }) },
+    { attachments: [{ path: "fixture.txt", text: "😀".repeat(32_769) }] },
+    { attachments: [{ path: "fixture.txt", text: "fixture\0" }] },
+    { attachments: [{ path: "", text: "fixture" }] },
+    { attachments: [{ path: "fixture.txt" }] },
+  ];
+  for (const fields of invalid) {
+    expect(() => parseRpcParams("runs.start", { prompt: "fixture", ...fields }))
+      .toThrow(expect.objectContaining({ code: -32602 }));
+  }
+});
+
+test("validates new history, workspace, and git RPC methods", () => {
+  const workspacePath = "/fixture";
+  const cases = {
+    "runs.list": { limit: 200, query: '"fixture"*', workspacePath },
+    "runs.conversations": { query: "", workspacePath: null },
+    "runs.fork": { conversationId: "thread", upToRunId: "run", workspacePath: null },
+    "runs.delete": { id: "run" },
+    "runs.deleteConversation": { id: "thread", workspacePath },
+    "runs.usage": { days: 30 },
+    "workspace.files": { query: "fixture.ts", limit: 100, workspacePath },
+    "workspace.create": { path: "fixture.txt", kind: "file", text: "", workspacePath },
+    "workspace.rename": { from: "fixture.txt", to: "renamed.txt", workspacePath },
+    "workspace.remove": { path: "fixture.txt", workspacePath },
+    "workspace.projectRules": { workspacePath },
+    "git.status": { workspacePath },
+    "git.diff": { path: "fixture.txt", staged: false, workspacePath },
+  };
+  for (const [method, params] of Object.entries(cases)) {
+    if (!isRpcMethod(method)) throw new Error(`Expected ${method} to be a supported method.`);
+    expect(parseRpcParams(method, { ...params, redundant: true })).toEqual(params);
+  }
+  expect(parseRpcParams("runs.usage", undefined)).toEqual({});
+  expect(parseRpcParams("git.diff", undefined)).toEqual({});
+
+  const invalid = [
+    () => parseRpcParams("runs.list", { query: "fixture\0" }),
+    () => parseRpcParams("runs.conversations", { limit: 201 }),
+    () => parseRpcParams("runs.fork", { conversationId: "thread" }),
+    () => parseRpcParams("runs.fork", { conversationId: "thread", workspacePath: null, upToRunId: 3 }),
+    () => parseRpcParams("runs.delete", { id: "" }),
+    () => parseRpcParams("runs.deleteConversation", { id: "other/thread", workspacePath: null }),
+    () => parseRpcParams("runs.usage", { days: 0 }),
+    () => parseRpcParams("workspace.files", { limit: 1.5 }),
+    () => parseRpcParams("workspace.files", { limit: 501 }),
+    () => parseRpcParams("workspace.create", { path: "fixture", kind: "symlink" }),
+    () => parseRpcParams("workspace.rename", { from: "fixture" }),
+    () => parseRpcParams("workspace.remove", { path: "fixture\0" }),
+    () => parseRpcParams("workspace.projectRules", { workspacePath: null }),
+    () => parseRpcParams("git.status", { workspacePath: true }),
+    () => parseRpcParams("git.diff", { staged: "true" }),
+  ];
+  for (const operation of invalid) expect(operation).toThrow(expect.objectContaining({ code: -32602 }));
+});
+
 test("validates the envelope and preserves a usable ID when the envelope is invalid", () => {
   expect(rpcEnvelope.safeParse({ jsonrpc: "2.0", method: "runs.list", id: 1 }).success).toBe(true);
   const wrongVersion = { jsonrpc: "1.0", method: "runs.list", id: "fixture" };

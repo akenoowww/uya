@@ -46,8 +46,11 @@ export interface RunInput {
   providerId?: string;
   model?: string;
   effort?: EffortLevel;
+  broadcastGroupId?: string;
+  includeProjectRules?: boolean;
   prompt: string;
   contextPaths?: string[];
+  attachments?: TextContext[];
   selection?: EditorSelection;
   mode?: RoutingMode;
   fallbackIds?: string[];
@@ -60,6 +63,7 @@ export type RunStatus = "running" | "succeeded" | "failed" | "cancelled";
 export interface RunSummary {
   id: string;
   conversationId?: string;
+  broadcastGroupId?: string;
   providerId: string;
   providerName?: string;
   model?: string;
@@ -169,6 +173,37 @@ export interface ProjectRuleFile {
   bytes: number;
 }
 
+export interface ConversationSummary {
+  id: string;
+  workspacePath: string | null;
+  title: string;
+  providerId: string;
+  providerName?: string;
+  model?: string;
+  effort?: EffortLevel;
+  turnCount: number;
+  lastRunAt: number;
+  lastStatus: RunStatus;
+}
+
+export interface ProviderUsageStats {
+  providerId: string;
+  providerName: string;
+  runs: number;
+  succeeded: number;
+  failed: number;
+  avgTtftMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  efforts: Record<string, number>;
+}
+
+export interface UsageStats {
+  days: number;
+  totalRuns: number;
+  byProvider: ProviderUsageStats[];
+}
+
 type Empty = Record<string, never>;
 
 export interface RpcMethods {
@@ -178,8 +213,13 @@ export interface RpcMethods {
   "providers.remove": [{ id: string }, null];
   "runs.start": [RunInput, RunSummary];
   "runs.get": [{ id: string }, RunDetail];
-  "runs.list": [{ limit?: number }, RunSummary[]];
+  "runs.list": [{ limit?: number; query?: string; workspacePath?: string | null }, RunSummary[]];
   "runs.conversation": [{ id: string; workspacePath: string | null }, RunDetail[]];
+  "runs.conversations": [{ limit?: number; query?: string; workspacePath?: string | null }, ConversationSummary[]];
+  "runs.fork": [{ conversationId: string; upToRunId?: string; workspacePath: string | null }, { conversationId: string; runs: RunDetail[] }];
+  "runs.delete": [{ id: string }, null];
+  "runs.deleteConversation": [{ id: string; workspacePath: string | null }, null];
+  "runs.usage": [{ days?: number }, UsageStats];
   "runs.cancel": [{ id: string }, null];
   "runs.getRules": [Empty, RoutingRule[]];
   "runs.setRules": [{ rules: RoutingRule[] }, RoutingRule[]];

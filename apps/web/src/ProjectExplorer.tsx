@@ -1,6 +1,9 @@
-import { ActionIcon, Button, Checkbox } from "@mantine/core";
 import {
-  ArrowClockwise, CaretDown, CaretRight, File, FileCode, FileText, Folder, FolderOpen,
+  ActionIcon, Button, Checkbox, Group, Modal, ScrollArea, Stack, Text, TextInput,
+} from "@mantine/core";
+import {
+  ArrowClockwise, CaretDown, CaretRight, File, FileCode, FilePlus, FileText,
+  Folder, FolderOpen, FolderPlus, PencilSimple, Trash,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import type { DirectoryEntry, RpcCall } from "@ide/protocol";
@@ -17,11 +20,18 @@ interface ExplorerProps {
   refreshKey?: number;
 }
 
+type FileMutation =
+  | { kind: "create-file"; parentDir: string }
+  | { kind: "create-dir"; parentDir: string }
+  | { kind: "rename"; entry: DirectoryEntry }
+  | { kind: "remove"; entry: DirectoryEntry };
+
 interface RowsProps extends Pick<ExplorerProps, "api" | "onOpen" | "activePath" | "selectedContext" | "onToggleContext"> {
   path?: string;
   workspacePath: string;
   refreshKey: string;
   depth: number;
+  onMutate: (action: FileMutation) => void;
 }
 
 function FileIcon({ name }: { name: string }) {
@@ -32,7 +42,7 @@ function FileIcon({ name }: { name: string }) {
 }
 
 function DirectoryRows(props: RowsProps) {
-  const { api, path, workspacePath, refreshKey, depth, activePath, selectedContext, onOpen, onToggleContext } = props;
+  const { api, path, workspacePath, refreshKey, depth, activePath, selectedContext, onOpen, onToggleContext, onMutate } = props;
   const [entries, setEntries] = useState<DirectoryEntry[] | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState("");
@@ -51,16 +61,16 @@ function DirectoryRows(props: RowsProps) {
 
   if (error) {
     return (
-      <div className="editor-inline-error" role="alert">
-        {error}{" "}
+      <Group gap="xs" p="xs" role="alert">
+        <Text size="xs" c="red">{error}</Text>
         <Button size="compact-xs" variant="subtle" color="iris" onClick={() => setRetry((value) => value + 1)}>
           Retry
         </Button>
-      </div>
+      </Group>
     );
   }
-  if (!entries) return <p className="editor-note" role="status">Loading files…</p>;
-  if (!entries.length) return <p className="editor-note">This folder is empty.</p>;
+  if (!entries) return <Text size="xs" c="dimmed" p="xs" role="status">Loading files…</Text>;
+  if (!entries.length) return <Text size="xs" c="dimmed" p="xs">This folder is empty.</Text>;
 
   function toggleDirectory(dirPath: string) {
     setExpanded((current) => {
@@ -79,7 +89,7 @@ function DirectoryRows(props: RowsProps) {
         const selected = selectedContext.includes(entry.path);
         return (
           <li key={entry.path}>
-            <div className={`file-row${activePath === entry.path ? " file-row-active" : ""}`} style={{ paddingInlineStart: 10 + depth * 14 }}>
+            <div className={`file-row${activePath === entry.path ? " file-row-active" : ""}`} style={{ paddingInlineStart: 8 + depth * 14 }}>
               <button
                 type="button"
                 className="file-name"
@@ -101,6 +111,40 @@ function DirectoryRows(props: RowsProps) {
                 )}
                 <span>{entry.name}</span>
               </button>
+              <span className="file-row-hover-actions">
+                {directory && (
+                  <ActionIcon
+                    size={18}
+                    variant="subtle"
+                    color="gray"
+                    aria-label={`New file in ${entry.path}`}
+                    title="New file here"
+                    onClick={() => onMutate({ kind: "create-file", parentDir: entry.path })}
+                  >
+                    <FilePlus size={11} />
+                  </ActionIcon>
+                )}
+                <ActionIcon
+                  size={18}
+                  variant="subtle"
+                  color="gray"
+                  aria-label={`Rename ${entry.path}`}
+                  title="Rename"
+                  onClick={() => onMutate({ kind: "rename", entry })}
+                >
+                  <PencilSimple size={11} />
+                </ActionIcon>
+                <ActionIcon
+                  size={18}
+                  variant="subtle"
+                  color="red"
+                  aria-label={`Delete ${entry.path}`}
+                  title="Delete"
+                  onClick={() => onMutate({ kind: "remove", entry })}
+                >
+                  <Trash size={11} />
+                </ActionIcon>
+              </span>
               {!directory && (
                 <Checkbox
                   size="xs"
@@ -121,33 +165,166 @@ function DirectoryRows(props: RowsProps) {
 
 export function ProjectExplorer({ root, onChooseProject, refreshKey = 0, ...props }: ExplorerProps) {
   const [refresh, setRefresh] = useState(0);
-  const name = root?.split("/").filter(Boolean).at(-1) ?? root;
+  const [mutation, setMutation] = useState<FileMutation | null>(null);
+  const [inputValue, setInputValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [mutationError, setMutationError] = useState("");
+
+  function openMutation(next: FileMutation) {
+    setMutation(next);
+    setMutationError("");
+    if (next.kind === "rename") setInputValue(next.entry.path);
+    else if (next.kind === "create-file" || next.kind === "create-dir") {
+      setInputValue(next.parentDir ? `${next.parentDir}/` : "");
+    } else {
+      setInputValue("");
+    }
+  }
+
+  async function submitMutation() {
+    if (!root || !mutation || busy) return;
+    setBusy(true);
+    setMutationError("");
+    try {
+      if (mutation.kind === "create-file" || mutation.kind === "create-dir") {
+        const target = inputValue.trim().replace(/^\/+/, "");
+        const created = await props.api("workspace.create", {
+          path: target,
+          kind: mutation.kind === "create-file" ? "file" : "directory",
+          workspacePath: root,
+        });
+        setMutation(null);
+        setRefresh((value) => value + 1);
+        if (created.kind === "file") props.onOpen(created.path);
+      } else if (mutation.kind === "rename") {
+        const target = inputValue.trim().replace(/^\/+/, "");
+        await props.api("workspace.rename", {
+          from: mutation.entry.path,
+          to: target,
+          workspacePath: root,
+        });
+        setMutation(null);
+        setRefresh((value) => value + 1);
+      } else {
+        await props.api("workspace.remove", { path: mutation.entry.path, workspacePath: root });
+        setMutation(null);
+        setRefresh((value) => value + 1);
+      }
+    } catch (reason: unknown) {
+      setMutationError(reason instanceof Error ? reason.message : "File operation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="tool-pane" aria-label="Project explorer">
       <header className="tool-heading">
         <h2>Explorer</h2>
-        <div className="tool-actions">
-          <ActionIcon size="sm" onClick={onChooseProject} aria-label="Open project folder" title="Open project folder">
-            <FolderOpen size={15} weight="duotone" />
-          </ActionIcon>
-          {root && (
-            <ActionIcon size="sm" onClick={() => setRefresh((value) => value + 1)} aria-label="Refresh file tree" title="Refresh file tree">
-              <ArrowClockwise size={13} />
+        <Group gap={2} wrap="nowrap">
+          {root ? (
+            <>
+              <ActionIcon
+                size="sm"
+                onClick={() => openMutation({ kind: "create-file", parentDir: "" })}
+                aria-label="New file"
+                title="New file"
+              >
+                <FilePlus size={14} weight="duotone" />
+              </ActionIcon>
+              <ActionIcon
+                size="sm"
+                onClick={() => openMutation({ kind: "create-dir", parentDir: "" })}
+                aria-label="New folder"
+                title="New folder"
+              >
+                <FolderPlus size={14} weight="duotone" />
+              </ActionIcon>
+              <ActionIcon
+                size="sm"
+                onClick={() => setRefresh((value) => value + 1)}
+                aria-label="Refresh file tree"
+                title="Refresh file tree"
+              >
+                <ArrowClockwise size={13} />
+              </ActionIcon>
+            </>
+          ) : (
+            <ActionIcon size="sm" onClick={onChooseProject} aria-label="Open project folder" title="Open project folder">
+              <FolderOpen size={15} weight="duotone" />
             </ActionIcon>
           )}
-        </div>
+        </Group>
       </header>
       {root ? (
-        <>
-          <div className="project-label" title={root}><FolderOpen size={14} weight="duotone" /> <span>{name}</span></div>
-          <div className="tool-scroll"><DirectoryRows key={root} {...props} workspacePath={root} refreshKey={`${refreshKey}:${refresh}`} depth={0} /></div>
-        </>
+        <ScrollArea className="tool-scroll" type="auto">
+          <div style={{ paddingBlock: 4 }}>
+            <DirectoryRows
+              key={root}
+              {...props}
+              workspacePath={root}
+              refreshKey={`${refreshKey}:${refresh}`}
+              depth={0}
+              onMutate={openMutation}
+            />
+          </div>
+        </ScrollArea>
       ) : (
-        <div className="editor-empty">
-          <FolderOpen size={22} weight="duotone" aria-hidden="true" />
+        <Stack align="center" justify="center" gap="xs" flex={1} p="md">
+          <FolderOpen size={22} weight="duotone" color="var(--muted)" />
           <Button variant="default" size="compact-xs" onClick={onChooseProject}>Open folder</Button>
-        </div>
+        </Stack>
       )}
+
+      <Modal
+        opened={Boolean(mutation)}
+        onClose={() => !busy && setMutation(null)}
+        title={
+          mutation?.kind === "create-file" ? "New file"
+            : mutation?.kind === "create-dir" ? "New folder"
+              : mutation?.kind === "rename" ? "Rename"
+                : mutation ? `Delete ${mutation.entry.name}?` : ""
+        }
+        size="sm"
+      >
+        {mutation?.kind === "remove" ? (
+          <>
+            <Text size="xs" c="dimmed" mb="sm">
+              Permanently remove <code>{mutation.entry.path}</code> from disk?
+            </Text>
+            {mutationError && <Text size="xs" c="red" mb="sm">{mutationError}</Text>}
+            <Group justify="flex-end" gap="xs">
+              <Button variant="default" disabled={busy} onClick={() => setMutation(null)}>Cancel</Button>
+              <Button color="red" variant="light" loading={busy} onClick={() => void submitMutation()}>Delete</Button>
+            </Group>
+          </>
+        ) : (
+          <form onSubmit={(event) => { event.preventDefault(); void submitMutation(); }}>
+            <TextInput
+              autoFocus
+              size="xs"
+              label={mutation?.kind === "rename" ? "New relative path" : "Relative path"}
+              placeholder={mutation?.kind === "create-dir" ? "src/utils" : "src/example.ts"}
+              value={inputValue}
+              onChange={(event) => setInputValue(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) {
+                  event.preventDefault();
+                }
+              }}
+              spellCheck={false}
+              mb="sm"
+            />
+            {mutationError && <Text size="xs" c="red" mb="sm">{mutationError}</Text>}
+            <Group justify="flex-end" gap="xs">
+              <Button variant="default" disabled={busy} onClick={() => setMutation(null)}>Cancel</Button>
+              <Button type="submit" color="iris" loading={busy} disabled={!inputValue.trim()}>
+                {mutation?.kind === "rename" ? "Rename" : "Create"}
+              </Button>
+            </Group>
+          </form>
+        )}
+      </Modal>
     </section>
   );
 }

@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
-import type { Provider } from "@ide/protocol";
+import type { Provider, RunDetail } from "@ide/protocol";
+import { parseEffortArg, resolveSupportedEfforts } from "./components/EffortPicker";
+import { buildJudgePrompt, extractRunReplyText } from "./components/JudgeModal";
+import { extractMentionQuery } from "./components/MentionMenu";
 import { matchSlashSuggestions, parseSlashInvocation } from "./slashCommands";
-import { paneDisplayTitle, resolveModel, routingTargets } from "./workbenchStore";
+import { clearTerminalSession, readLatestTerminalOutput, recordTerminalOutput, stripAnsi } from "./terminalBuffer";
+import { estimateContextBudget, paneDisplayTitle, resolveModel, routingTargets } from "./workbenchStore";
 import type { DockSnapshot } from "./workbenchStore";
 
 const codex: Provider = {
@@ -63,5 +67,101 @@ test("slash command matching and parsing handles aliases and arguments", () => {
     command: expect.objectContaining({ name: "model" }),
     arg: "claude-opus-4-6",
   });
+  expect(parseSlashInvocation("/effort max")).toEqual({
+    command: expect.objectContaining({ name: "effort" }),
+    arg: "max",
+  });
+  expect(parseSlashInvocation("/judge")).toEqual({
+    command: expect.objectContaining({ name: "judge" }),
+    arg: "",
+  });
   expect(parseSlashInvocation("/unknown-prompt")).toBeNull();
+});
+
+test("EffortPicker helpers resolve per-model efforts and parse user aliases", () => {
+  const provider: Provider = {
+    ...codex,
+    supportedEfforts: ["low", "medium", "high"],
+    modelEfforts: { "gpt-6.2-sol": ["low", "medium", "high", "xhigh", "max"] },
+  };
+  expect(resolveSupportedEfforts(provider, "gpt-6.2-sol")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  expect(resolveSupportedEfforts(provider, "other")).toEqual(["low", "medium", "high"]);
+  expect(parseEffortArg("auto")).toBe("auto");
+  expect(parseEffortArg("med")).toBe("medium");
+  expect(parseEffortArg("min")).toBe("minimal");
+  expect(parseEffortArg("xhigh")).toBe("xhigh");
+  expect(parseEffortArg("invalid")).toBeNull();
+});
+
+test("extractMentionQuery detects @ mentions at start or after whitespace", () => {
+  expect(extractMentionQuery("@git", 4)).toEqual({ start: 0, query: "git" });
+  expect(extractMentionQuery("fix @src/App", 12)).toEqual({ start: 4, query: "src/App" });
+  expect(extractMentionQuery("email user@example.com", 22)).toBeNull();
+});
+
+test("estimateContextBudget sums files, attachments, selection, and optional project rules", () => {
+  const budget = estimateContextBudget({
+    contextPaths: ["src/a.ts"],
+    contextSizes: { "src/a.ts": 4000 },
+    attachments: [{ path: "@git-diff", text: "a".repeat(2000) }],
+    selection: { path: "src/a.ts", text: "b".repeat(1000), revision: "r1" },
+    projectRules: [{ path: "AGENTS.md", bytes: 1000 }],
+    includeProjectRules: true,
+  });
+  expect(budget.bytes).toBe(8000);
+  expect(budget.approxTokens).toBe(2000);
+
+  const withoutRules = estimateContextBudget({
+    contextPaths: ["src/a.ts"],
+    contextSizes: { "src/a.ts": 4000 },
+    attachments: [],
+    selection: null,
+    projectRules: [{ path: "AGENTS.md", bytes: 1000 }],
+    includeProjectRules: false,
+  });
+  expect(withoutRules.bytes).toBe(4000);
+});
+
+test("Judge helpers extract latest attempt text and format cross-review prompt", () => {
+  const detail: RunDetail = {
+    run: {
+      id: "r1",
+      providerId: "claude",
+      providerName: "Claude Code",
+      prompt: "Explain race condition",
+      status: "succeeded",
+      startedAt: 1000,
+    },
+    events: [
+      { runId: "r1", seq: 1, type: "status", run: { id: "r1", providerId: "codex", prompt: "Explain race condition", status: "running", startedAt: 1000 } },
+      { runId: "r1", seq: 2, type: "text", text: "stale attempt" },
+      { runId: "r1", seq: 3, type: "status", run: { id: "r1", providerId: "claude", prompt: "Explain race condition", status: "running", startedAt: 1000 } },
+      { runId: "r1", seq: 4, type: "text", text: "Final " },
+      { runId: "r1", seq: 5, type: "text", text: "answer" },
+    ],
+  };
+  expect(extractRunReplyText(detail)).toBe("Final answer");
+  const prompt = buildJudgePrompt("review", "Explain race condition", [
+    { label: "Claude Code", text: "Final answer" },
+    { label: "Codex", text: "Second answer" },
+  ]);
+  expect(prompt).toContain("Original Request");
+  expect(prompt).toContain("### Candidate 1: Claude Code");
+  expect(prompt).toContain("### Candidate 2: Codex");
+
+  const hugePrompt = buildJudgePrompt("synthesize", "Summarize", [
+    { label: "A", text: "x".repeat(180_000) },
+    { label: "B", text: "y".repeat(180_000) },
+  ]);
+  expect(hugePrompt.length).toBeLessThan(256_000);
+  expect(hugePrompt).toContain("[...truncated for review budget...]");
+});
+
+test("terminalBuffer strips ANSI escape codes and tracks latest session output", () => {
+  expect(stripAnsi("\x1b[31mError:\x1b[0m failed")).toBe("Error: failed");
+  recordTerminalOutput("term-test-1", "Shell", "\x1b[32mPASS\x1b[0m line 1\r\nline 2\n");
+  const snap = readLatestTerminalOutput();
+  expect(snap?.title).toBe("Shell");
+  expect(snap?.text).toBe("PASS line 1\nline 2");
+  clearTerminalSession("term-test-1");
 });

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { Button, Group, Text } from "@mantine/core";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button, Group, Loader, Modal, Text } from "@mantine/core";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { errorMessage } from "./bridge";
 import { hasPendingEditorSaves, hasUnsavedEditorDrafts } from "./editorDrafts";
@@ -109,53 +109,39 @@ export function useAppUpdate(store: WorkbenchStore, reconnect: () => void) {
 
 export function AppUpdateDialog({ update }: { update: ReturnType<typeof useAppUpdate> }) {
   const { notice, version, pendingVersion, dismiss, restart } = update;
-  const dialog = useRef<HTMLDialogElement>(null);
-  const dismissButton = useRef<HTMLButtonElement>(null);
-  const titleId = useId();
-  const messageId = useId();
   const kind = notice?.kind;
-
-  useLayoutEffect(() => {
-    const modal = dialog.current;
-    if (!modal) return;
-    if (!kind) {
-      if (modal.open) modal.close();
-    } else if (!modal.open) {
-      modal.showModal();
-    } else if (kind === "terminals-open") {
-      dismissButton.current?.focus();
-    }
-  }, [kind]);
+  const locked = kind === "installing";
 
   let message: string | undefined;
-  switch (notice?.kind) {
+  switch (kind) {
     case "checking": message = "Checking for updates…"; break;
     case "up-to-date": message = `Uya ${version} is up to date.`; break;
     case "ready": message = `Uya ${pendingVersion} is ready to install.`; break;
     case "installing": message = "Installing the update. Uya will restart."; break;
     case "terminals-open": message = "Restarting Uya will end your open terminal sessions."; break;
     case "blocked":
-    case "error": message = notice.message; break;
+    case "error": message = notice?.message; break;
   }
 
   return (
-    <dialog
-      ref={dialog}
-      className="app-update-dialog"
-      aria-labelledby={titleId}
-      aria-describedby={messageId}
-      onCancel={(event) => { if (kind === "installing") event.preventDefault(); }}
-      onClose={() => { if (!dialog.current?.open) dismiss(); }}
+    <Modal
+      opened={Boolean(kind)}
+      onClose={() => { if (!locked) dismiss(); }}
+      title="Uya updates"
+      size="sm"
+      closeOnClickOutside={!locked}
+      closeOnEscape={!locked}
+      withCloseButton={!locked}
     >
-      <Text component="h1" id={titleId} fw={650} m={0}>Uya updates</Text>
-      <Text id={messageId} size="sm" c="dimmed" mt={8} mb={16} role="status">{message}</Text>
-      {kind !== "installing" && (
+      <Group gap="xs" align="center" mb="md" role="status">
+        {(kind === "checking" || kind === "installing") && <Loader size="xs" color="iris" />}
+        <Text size="sm" c="dimmed">{message}</Text>
+      </Group>
+      {!locked && (
         <Group justify="flex-end" gap="xs">
-          <form method="dialog">
-            <Button type="submit" ref={dismissButton} variant="default" size="xs">
-              {kind === "ready" || kind === "terminals-open" ? "Later" : "Close"}
-            </Button>
-          </form>
+          <Button variant="default" size="xs" onClick={dismiss} autoFocus={kind === "terminals-open"}>
+            {kind === "ready" || kind === "terminals-open" ? "Later" : "Close"}
+          </Button>
           {(kind === "ready" || kind === "terminals-open") && (
             <Button size="xs" color="iris" onClick={() => void restart(kind === "terminals-open")}>
               Restart to Update
@@ -163,6 +149,6 @@ export function AppUpdateDialog({ update }: { update: ReturnType<typeof useAppUp
           )}
         </Group>
       )}
-    </dialog>
+    </Modal>
   );
 }

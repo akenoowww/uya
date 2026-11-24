@@ -1,22 +1,30 @@
-import type { EditorSelection, RenderedPrompt, RoutingRule, RunInput } from "@ide/protocol";
+import type {
+  ConversationSummary, EditorSelection, EffortLevel, RenderedPrompt, RoutingRule, RunInput,
+} from "@ide/protocol";
 import type { SettingsControls } from "./SettingsDialog";
+import { errorMessage } from "./bridge";
+import { parseEffortArg, resolveSupportedEfforts } from "./components/EffortPicker";
+import { buildJudgePrompt, extractRunReplyText } from "./components/JudgeModal";
+import type { JudgePreset } from "./components/JudgeModal";
+import type { ApplyPreviewRequest } from "./components/MarkdownView";
 import { createCoreSession } from "./coreSession";
 import { createDockLayout } from "./dockLayout";
 import { hasPendingEditorSaves, hasUnsavedEditorDrafts } from "./editorDrafts";
-import { errorMessage } from "./bridge";
 import { parseSlashInvocation } from "./slashCommands";
+import { readLatestTerminalOutput } from "./terminalBuffer";
 import {
   activeChatPane, conversationKey, createWorkbenchStore, hasBusyDestination,
-  isPaneBusy, providerForPane, resolveModel, routingTargets,
+  isPaneBusy, providerForPane, resolveModel, routingTargets, utf8Bytes,
 } from "./workbenchStore";
-import type { ChatPane, WorkbenchState } from "./workbenchStore";
+import type { ChatPane, SidebarView, WorkbenchState } from "./workbenchStore";
 
 export function createWorkbench() {
   const store = createWorkbenchStore();
   const dock = createDockLayout(store);
   const core = createCoreSession(store);
   const settings: { current: SettingsControls | null } = { current: null };
-  const projectConfirm: { current: (() => void) | null } = { current: null };
+  const projectConfirm: { current: ((pendingRecentPath?: string) => void) | null } = { current: null };
+  const judgeDialog: { current: (() => void) | null } = { current: null };
 
   function pushPromptHistory(paneId: string, prompt: string) {
     store.setState((state) => {
@@ -47,6 +55,109 @@ export function createWorkbench() {
       if (detail?.run.status === "running") return detail.run.id;
     }
     return undefined;
+  }
+
+  async function measureContextFile(path: string) {
+    const { bridge, workspace } = store.getState();
+    if (!bridge || !workspace) return;
+    try {
+      const file = await bridge.rpc("workspace.read", { path, workspacePath: workspace.path });
+      store.setState((state) => ({
+        contextSizes: { ...state.contextSizes, [path]: utf8Bytes(file.text) },
+      }));
+    } catch {
+      // Size estimation is best-effort; backend enforces the authoritative limit.
+    }
+  }
+
+  function toggleContext(path: string) {
+    const adding = !store.getState().contextPaths.includes(path);
+    store.setState((state) => ({
+      contextPaths: adding ? [...state.contextPaths, path] : state.contextPaths.filter((item) => item !== path),
+    }));
+    if (adding) void measureContextFile(path);
+  }
+
+  function attachFile(path: string) {
+    if (!store.getState().contextPaths.includes(path)) {
+      toggleContext(path);
+    }
+  }
+
+  async function attachGitDiff(staged = false) {
+    const { bridge, workspace } = store.getState();
+    if (!bridge || !workspace) {
+      core.reportError("Open a Git project folder first.");
+      return;
+    }
+    core.reportError("");
+    try {
+      const result = await bridge.rpc("git.diff", { staged, workspacePath: workspace.path });
+      if (!result.diff.trim()) {
+        core.reportError(staged ? "No staged Git diff to attach." : "Working tree has no unstaged diff to attach.");
+        return;
+      }
+      const label = staged ? "@git-staged" : "@git-diff";
+      store.setState((state) => ({
+        attachments: [
+          ...state.attachments.filter((item) => item.path !== label),
+          { path: label, text: result.diff },
+        ],
+      }));
+    } catch (reason) {
+      core.reportError(errorMessage(reason));
+    }
+  }
+
+  function attachTerminal() {
+    const snapshot = readLatestTerminalOutput();
+    if (!snapshot) {
+      core.reportError("No terminal output captured yet.");
+      return;
+    }
+    core.reportError("");
+    const label = `@terminal (${snapshot.title})`;
+    store.setState((state) => ({
+      attachments: [
+        ...state.attachments.filter((item) => !item.path.startsWith("@terminal")),
+        { path: label, text: snapshot.text },
+      ],
+    }));
+  }
+
+  function removeAttachment(path: string) {
+    store.setState((state) => ({
+      attachments: state.attachments.filter((item) => item.path !== path),
+    }));
+  }
+
+  async function openExternalUrl(url: string) {
+    const { bridge } = store.getState();
+    if (!bridge) return;
+    try {
+      await bridge.openExternalUrl(url);
+    } catch (reason) {
+      core.reportError(errorMessage(reason));
+    }
+  }
+
+  function previewDiffFromCode(request: ApplyPreviewRequest) {
+    const state = store.getState();
+    if (!state.workspace) {
+      core.reportError("Open a project folder before previewing or applying code diffs.");
+      return;
+    }
+    const targetPath = request.suggestedPath ?? state.dock.filePath;
+    if (!targetPath) {
+      core.reportError("Open a target file in the editor (or include its path) to preview this diff.");
+      return;
+    }
+    dock.openDiff({
+      mode: "apply",
+      path: targetPath,
+      proposedCode: request.code,
+      language: request.language,
+    });
   }
 
   function executeSlashCommand(input: string, paneId?: string): boolean {
@@ -88,6 +199,37 @@ export function createWorkbench() {
         dock.configure(target.id, { model: matched });
         return true;
       }
+      case "effort": {
+        if (!target) return true;
+        const index = state.dock.chatPanes.findIndex((pane) => pane.id === target.id);
+        const provider = providerForPane(state.providers, target.config, index);
+        const model = resolveModel(provider, target.config.model);
+        const supported = resolveSupportedEfforts(provider, model);
+        if (!arg) {
+          const trigger = document.querySelector<HTMLButtonElement>(`[data-effort-trigger="${CSS.escape(target.id)}"]`);
+          trigger?.click();
+          return true;
+        }
+        const parsedEffort = parseEffortArg(arg);
+        if (!parsedEffort) {
+          core.reportError(`Unknown effort level "${arg}". Use auto, minimal, low, medium, high, xhigh, or max.`);
+          return true;
+        }
+        if (parsedEffort === "auto") {
+          dock.configure(target.id, { effort: undefined });
+          return true;
+        }
+        if (!supported.length) {
+          core.reportError(`${provider?.name ?? "This provider"} does not support reasoning effort.`);
+          return true;
+        }
+        if (!supported.includes(parsedEffort)) {
+          core.reportError(`${provider?.name ?? "This provider"} supports: ${supported.join(", ")}.`);
+          return true;
+        }
+        dock.configure(target.id, { effort: parsedEffort });
+        return true;
+      }
       case "provider": {
         if (!target) return true;
         if (!arg) {
@@ -101,7 +243,7 @@ export function createWorkbench() {
           core.reportError(`No available provider matching "${arg}".`);
           return true;
         }
-        dock.configure(target.id, { providerId: found.id, model: undefined, mode: found.structured ? "structured" : "terminal" });
+        dock.configure(target.id, { providerId: found.id, model: undefined, effort: undefined, mode: found.structured ? "structured" : "terminal" });
         return true;
       }
       case "terminal":
@@ -114,6 +256,12 @@ export function createWorkbench() {
         return true;
       case "broadcast":
         store.setState((current) => ({ broadcast: !current.broadcast, broadcastCollapsed: false }));
+        return true;
+      case "judge":
+        judgeDialog.current?.();
+        return true;
+      case "git":
+        store.setState((current) => ({ sidebar: current.sidebar === "git" ? null : "git" }));
         return true;
       case "prompts":
         dock.openTool("prompts", "Prompt Library");
@@ -132,7 +280,37 @@ export function createWorkbench() {
     }
   }
 
-  async function pickProject(discardConfirmed = false) {
+  async function openFolderPath(path: string, isRecent: boolean) {
+    const state = store.getState();
+    const bridge = state.bridge;
+    if (!bridge) return;
+    const preparedPath = isRecent ? await bridge.prepareRecentFolder(path) : path;
+    const project = await bridge.rpc("workspace.open", { path: preparedPath });
+    try {
+      await bridge.activateFolder(preparedPath);
+    } catch (reason) {
+      try {
+        if (state.workspace) await bridge.rpc("workspace.open", { path: state.workspace.path });
+        else await bridge.rpc("workspace.close", { path: project.path });
+      } catch {
+        throw new Error("Could not restore the previous project. Reopen a folder to continue.");
+      }
+      throw reason;
+    }
+    const changed = project.path !== state.workspace?.path;
+    if (changed) dock.closeEditors();
+    const recentWorkspaces = await bridge.listRecentFolders();
+    store.setState((current) => ({
+      workspace: project,
+      recentWorkspaces,
+      sidebar: "explorer",
+      refreshKey: current.refreshKey + 1,
+      ...(changed ? { selection: null, contextPaths: [], contextSizes: {}, attachments: [], editorDrafts: new Map() } : {}),
+    }));
+    void core.refreshWorkspaceMetadata(project.path);
+  }
+
+  async function pickProject(discardConfirmed = false, recentPath?: string) {
     const state = store.getState();
     const bridge = state.bridge;
     if (!bridge || state.choosingProject || state.submitting || state.submittingPanes.length > 0) return;
@@ -141,33 +319,18 @@ export function createWorkbench() {
       return;
     }
     if (!discardConfirmed && hasUnsavedEditorDrafts(state.editorDrafts)) {
-      projectConfirm.current?.();
+      projectConfirm.current?.(recentPath);
       return;
     }
     store.setState({ choosingProject: true, error: "" });
     try {
-      const path = await bridge.chooseFolder();
-      if (!path) return;
-      const project = await bridge.rpc("workspace.open", { path });
-      try {
-        await bridge.activateFolder(path);
-      } catch (reason) {
-        try {
-          if (state.workspace) await bridge.rpc("workspace.open", { path: state.workspace.path });
-          else await bridge.rpc("workspace.close", { path: project.path });
-        } catch {
-          throw new Error("Could not restore the previous project. Reopen a folder to continue.");
-        }
-        throw reason;
+      if (recentPath) {
+        await openFolderPath(recentPath, true);
+      } else {
+        const path = await bridge.chooseFolder();
+        if (!path) return;
+        await openFolderPath(path, false);
       }
-      const changed = project.path !== state.workspace?.path;
-      if (changed) dock.closeEditors();
-      store.setState((current) => ({
-        workspace: project,
-        sidebar: "explorer",
-        refreshKey: current.refreshKey + 1,
-        ...(changed ? { selection: null, contextPaths: [], editorDrafts: new Map() } : {}),
-      }));
     } catch (reason) {
       core.reportError(errorMessage(reason));
     } finally {
@@ -186,13 +349,74 @@ export function createWorkbench() {
     }
   }
 
+  async function resumeConversation(summary: ConversationSummary) {
+    const state = store.getState();
+    if (!state.bridge) return;
+    const activeRoot = state.workspace?.path ?? null;
+    if ((summary.workspacePath ?? null) !== activeRoot) {
+      core.reportError(summary.workspacePath
+        ? "Switch to that thread’s project folder to resume it."
+        : "Close the current project folder to resume this workspace-less thread.");
+      return;
+    }
+    dock.openConversationSplit(summary.id, {
+      providerId: summary.providerId,
+      model: summary.model,
+      effort: summary.effort,
+      mode: "structured",
+    });
+  }
+
+  async function forkConversationToSplit(
+    conversationId: string,
+    workspacePath: string | null,
+    options?: { upToRunId?: string; providerId?: string; model?: string; effort?: EffortLevel },
+  ) {
+    const { bridge, workspace } = store.getState();
+    if (!bridge) return;
+    const activeRoot = workspace?.path ?? null;
+    if ((workspacePath ?? null) !== activeRoot) {
+      core.reportError(workspacePath
+        ? "Open that conversation’s project folder before forking it."
+        : "Close the current project folder before forking this workspace-less thread.");
+      return;
+    }
+    core.reportError("");
+    try {
+      const forked = await bridge.rpc("runs.fork", {
+        conversationId,
+        upToRunId: options?.upToRunId,
+        workspacePath: activeRoot,
+      });
+      for (const detail of forked.runs) {
+        core.recordDetail(detail);
+      }
+      const key = conversationKey(activeRoot, forked.conversationId);
+      store.setState((state) => ({
+        paneRuns: { ...state.paneRuns, [key]: forked.runs.map(({ run }) => run.id) },
+      }));
+      dock.openConversationSplit(forked.conversationId, {
+        providerId: options?.providerId ?? forked.runs.at(-1)?.run.providerId,
+        model: options?.model ?? forked.runs.at(-1)?.run.model,
+        effort: options?.effort ?? forked.runs.at(-1)?.run.effort,
+        mode: "structured",
+      });
+      void core.refreshHistory();
+    } catch (reason) {
+      core.reportError(errorMessage(reason));
+    }
+  }
+
   function applyPrompt(prompt: RenderedPrompt) {
     const state = store.getState();
     const target = getActiveChatPane();
-    if (prompt.providerId && target) {
-      dock.configure(target.id, { providerId: prompt.providerId, model: undefined, mode: "structured" });
+    if (target && (prompt.providerId || prompt.effort)) {
+      dock.configure(target.id, {
+        ...(prompt.providerId ? { providerId: prompt.providerId, model: undefined, mode: "structured" } : {}),
+        ...(prompt.effort ? { effort: prompt.effort } : {}),
+      });
       dock.activate(target.id);
-      if (!state.providers.some((provider) => provider.id === prompt.providerId && provider.available && provider.structured)) {
+      if (prompt.providerId && !state.providers.some((provider) => provider.id === prompt.providerId && provider.available && provider.structured)) {
         core.reportError("The template’s provider is unavailable. Choose a provider before sending.");
       }
     }
@@ -224,7 +448,7 @@ export function createWorkbench() {
 
   async function sendToPane(paneId: string, promptOverride?: string) {
     const state = store.getState();
-    const { bridge, choosingProject, contextPaths, selection, template } = state;
+    const { bridge, choosingProject, contextPaths, attachments, selection, template, includeProjectRules, projectRules } = state;
     const rawDraft = promptOverride ?? state.paneDrafts[paneId] ?? "";
     const prompt = rawDraft.trim();
     if (!prompt) return;
@@ -249,13 +473,19 @@ export function createWorkbench() {
     }));
     const root = state.workspace?.path ?? null;
     try {
+      const model = resolveModel(provider, pane.config.model);
+      const supported = resolveSupportedEfforts(provider, model);
+      const effort = pane.config.effort && supported.includes(pane.config.effort) ? pane.config.effort : undefined;
       const request: RunInput = {
         conversationId: pane.config.conversationId,
         workspacePath: root,
         providerId: provider.id,
-        model: resolveModel(provider, pane.config.model),
+        model,
+        effort,
+        includeProjectRules: includeProjectRules && projectRules.length > 0 ? true : undefined,
         prompt,
         contextPaths,
+        attachments: attachments.length ? attachments : undefined,
         selection: selection ?? undefined,
         mode: "manual",
         promptVersion: template?.text.trim() === prompt ? template.revision : undefined,
@@ -283,8 +513,8 @@ export function createWorkbench() {
   async function sendPrompt() {
     const state = store.getState();
     const {
-      bridge, choosingProject, submitting, composer, contextPaths, selection, tags,
-      fallbackIds, template, routing, broadcast, broadcastTargets,
+      bridge, choosingProject, submitting, composer, contextPaths, attachments, selection, tags,
+      fallbackIds, template, routing, broadcast, broadcastTargets, includeProjectRules, projectRules,
     } = state;
     const prompt = composer.trim();
     if (!prompt) return;
@@ -297,6 +527,7 @@ export function createWorkbench() {
     const { useBroadcast, destinations } = routingTargets(state.providers, state.dock, broadcast, broadcastTargets);
     if (!bridge || choosingProject || submitting || !destinations.length || hasBusyDestination(state, destinations)) return;
     const destIds = destinations.map((pane) => pane.id);
+    const broadcastGroupId = useBroadcast && destinations.length > 1 ? crypto.randomUUID() : undefined;
     store.setState((current) => ({
       submitting: true,
       error: "",
@@ -304,15 +535,23 @@ export function createWorkbench() {
     }));
     if (!useBroadcast) dock.activate(destinations[0].id);
     const root = state.workspace?.path ?? null;
+    const startedRunIds: string[] = [];
     try {
       const outcomes = await Promise.allSettled(destinations.map(async ({ id, config, provider }) => {
+        const model = resolveModel(provider, config.model);
+        const supported = resolveSupportedEfforts(provider, model);
+        const effort = config.effort && supported.includes(config.effort) ? config.effort : undefined;
         const request: RunInput = {
           conversationId: config.conversationId,
           workspacePath: root,
           providerId: provider.id,
-          model: resolveModel(provider, config.model),
+          model,
+          effort,
+          broadcastGroupId,
+          includeProjectRules: includeProjectRules && projectRules.length > 0 ? true : undefined,
           prompt,
           contextPaths,
+          attachments: attachments.length ? attachments : undefined,
           selection: selection ?? undefined,
           mode: useBroadcast ? "manual" : routing,
           tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
@@ -320,6 +559,7 @@ export function createWorkbench() {
           promptVersion: template?.text.trim() === prompt ? template.revision : undefined,
         };
         const run = await bridge.rpc("runs.start", request);
+        startedRunIds.push(run.id);
         core.addRun(bridge, root, config.conversationId, run);
         pushPromptHistory(id, prompt);
       }));
@@ -329,6 +569,9 @@ export function createWorkbench() {
         store.setState((current) => ({
           composer: current.composer.trim() === prompt ? "" : current.composer,
           template: current.template === template ? null : current.template,
+          ...(broadcastGroupId && startedRunIds.length >= 2
+            ? { lastBroadcastGroupId: broadcastGroupId, lastBroadcastRunIds: startedRunIds }
+            : {}),
         }));
       }
       if (failures.length) core.reportError(failures.join(" · "));
@@ -340,14 +583,49 @@ export function createWorkbench() {
     }
   }
 
+  async function runJudge(options: { providerId: string; model?: string; effort?: EffortLevel; preset: JudgePreset }) {
+    const state = store.getState();
+    const { bridge } = state;
+    if (!bridge) return;
+    const candidates = state.lastBroadcastRunIds
+      .map((id) => state.details[id])
+      .filter((detail): detail is NonNullable<typeof detail> => Boolean(detail && detail.run.status === "succeeded"));
+    if (candidates.length < 2) {
+      core.reportError("Need at least 2 completed broadcast responses to run cross-model review.");
+      return;
+    }
+    const originalPrompt = candidates[0].run.prompt;
+    const judgePrompt = buildJudgePrompt(
+      options.preset,
+      originalPrompt,
+      candidates.map((detail) => ({
+        label: `${detail.run.providerName ?? detail.run.providerId}${detail.run.model ? ` (${detail.run.model})` : ""}`,
+        text: extractRunReplyText(detail),
+      })),
+    );
+
+    const newPaneId = dock.newSplit({
+      providerId: options.providerId,
+      model: options.model,
+      effort: options.effort,
+      mode: "structured",
+    });
+    if (!newPaneId) return;
+    await sendToPane(newPaneId, judgePrompt);
+  }
+
   return {
-    store, core, dock, settings, projectConfirm, pickProject, openHistory, applyPrompt,
-    sendPrompt, sendToPane, setPaneDraft, executeSlashCommand, activeRunIdForPane,
-    activeChatPane: getActiveChatPane,
+    store, core, dock, settings, projectConfirm, judgeDialog,
+    pickProject, openHistory, resumeConversation, forkConversationToSplit,
+    applyPrompt, sendPrompt, sendToPane, runJudge, setPaneDraft, executeSlashCommand,
+    activeRunIdForPane, activeChatPane: getActiveChatPane,
+    toggleContext, attachFile, attachGitDiff, attachTerminal, removeAttachment,
+    openExternalUrl, previewDiffFromCode,
     readEditorDrafts: () => store.getState().editorDrafts,
     openProviders: () => settings.current?.showProviders(),
     openRules: () => settings.current?.showRules(),
     openShortcuts: () => settings.current?.showShortcuts(),
+    openUsage: () => settings.current?.showUsage(),
     setRules: (rules: RoutingRule[]) => store.setState({ rules }),
     retryConnection: () => store.setState((state) => ({ connectionAttempt: state.connectionAttempt + 1 })),
     toggleBroadcast: () => store.setState((state) => {
@@ -355,6 +633,7 @@ export function createWorkbench() {
       return { broadcast: !state.broadcast };
     }),
     toggleBroadcastCollapsed: () => store.setState((state) => ({ broadcastCollapsed: !state.broadcastCollapsed })),
+    toggleProjectRules: () => store.setState((state) => ({ includeProjectRules: !state.includeProjectRules })),
     toggleBroadcastTarget: (paneId: string) => store.setState((state) => {
       const current = state.broadcastTargets;
       if (!current.length) {
@@ -366,11 +645,8 @@ export function createWorkbench() {
       return { broadcastTargets: next, broadcast: true };
     }),
     selectAllBroadcastTargets: () => store.setState({ broadcastTargets: [], broadcast: true }),
-    toggleSidebar: (sidebar: Exclude<WorkbenchState["sidebar"], null>) => store.setState((state) => ({
+    toggleSidebar: (sidebar: Exclude<SidebarView, null>) => store.setState((state) => ({
       sidebar: state.sidebar === sidebar ? null : sidebar,
-    })),
-    toggleContext: (path: string) => store.setState((state) => ({
-      contextPaths: state.contextPaths.includes(path) ? state.contextPaths.filter((item) => item !== path) : [...state.contextPaths, path],
     })),
     selectCode(editorId: string, selection: EditorSelection | null) {
       if (store.getState().dock.editorId === editorId) store.setState({ selection });

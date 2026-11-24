@@ -14,6 +14,9 @@ interface EditorProps {
   drafts: EditorDrafts;
   active?: boolean;
   readOnly?: boolean;
+  refreshKey?: number;
+  revealLine?: number;
+  revealNonce?: number;
   onSelectionChange(selection: EditorSelection | null): void;
 }
 
@@ -22,7 +25,7 @@ interface OpenEditorProps extends Omit<EditorProps, "root" | "path"> {
   path: string;
 }
 
-function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = false, onSelectionChange }: OpenEditorProps) {
+function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = false, refreshKey = 0, revealLine, revealNonce, onSelectionChange }: OpenEditorProps) {
   const modelId = useId();
   const host = useRef<HTMLDivElement>(null);
   const notifySelection = useRef(onSelectionChange);
@@ -35,6 +38,7 @@ function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = fal
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [diskChanged, setDiskChanged] = useState(false);
   const [error, setError] = useState("");
   const [generation, setGeneration] = useState(0);
   const draftKey = `${root}\0${path}`;
@@ -49,6 +53,39 @@ function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = fal
     isReadOnly.current = readOnly;
     editorInstance.current?.updateOptions({ readOnly });
   }, [readOnly]);
+
+  useEffect(() => {
+    if (!loaded || !revealLine || revealLine < 1) return;
+    const codeEditor = editorInstance.current;
+    if (!codeEditor) return;
+    codeEditor.revealLineInCenter(revealLine);
+    codeEditor.setPosition({ lineNumber: revealLine, column: 1 });
+    codeEditor.focus();
+  }, [loaded, revealLine, revealNonce]);
+
+  useEffect(() => {
+    if (!loaded || refreshKey === 0) return;
+    const draft = drafts.get(draftKey);
+    if (!draft || draft.pendingSave) return;
+    let current = true;
+    void api("workspace.read", { path, workspacePath: root }).then((fresh) => {
+      if (!current || fresh.revision === draft.baseline.revision) return;
+      if (draft.text === draft.baseline.text) {
+        draft.baseline = fresh;
+        draft.text = fresh.text;
+        const model = editorInstance.current?.getModel();
+        if (model && model.getValue() !== fresh.text) {
+          const view = editorInstance.current?.saveViewState();
+          model.setValue(fresh.text);
+          if (view) editorInstance.current?.restoreViewState(view);
+        }
+        setDiskChanged(false);
+      } else {
+        setDiskChanged(true);
+      }
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [api, draftKey, drafts, loaded, path, refreshKey, root]);
 
   useEffect(() => {
     const container = host.current;
@@ -156,6 +193,7 @@ function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = fal
 
   function reload() {
     setReloading(false);
+    setDiskChanged(false);
     if (isReadOnly.current) return;
     if (isActive.current) notifySelection.current(null);
     drafts.delete(draftKey);
@@ -175,6 +213,13 @@ function OpenFileEditor({ root, path, api, drafts, active = true, readOnly = fal
           </ActionIcon>
         </div>
       </header>
+      {diskChanged && !reloading && (
+        <div className="editor-notice" role="status">
+          <span>This file changed on disk while you have unsaved edits.</span>
+          <Button size="compact-xs" variant="subtle" color="iris" onClick={reload} disabled={readOnly || saving}>Reload from disk</Button>
+          <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setDiskChanged(false)}>Keep local</Button>
+        </div>
+      )}
       {reloading && (
         <div className="editor-notice" role="status">
           <span>Discard local changes and reload this file?</span>

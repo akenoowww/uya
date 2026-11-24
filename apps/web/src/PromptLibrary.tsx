@@ -1,7 +1,8 @@
-import { ActionIcon, Alert, Button, Group, Select, Stack, Textarea, TextInput } from "@mantine/core";
+import { ActionIcon, Alert, Badge, Button, Group, Paper, ScrollArea, Select, Stack, Text, Textarea, TextInput } from "@mantine/core";
 import { ArrowClockwise, ArrowUpRight, BookOpen, PencilSimple, Plus } from "@phosphor-icons/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { PromptDocument, PromptRef, PromptSummary, RenderedPrompt, RpcCall } from "@ide/protocol";
+import { EFFORT_META } from "./components/EffortPicker";
 import "./editor.css";
 
 interface PromptLibraryProps {
@@ -21,7 +22,7 @@ function refKey(ref: PromptRef): string {
   return `${ref.scope}:${ref.path}`;
 }
 
-const blankPrompt = "---\ntitle: New prompt\nvariables:\n  topic: \"this project\"\n---\n\nSummarize {{topic}}.\n";
+const blankPrompt = "---\ntitle: New prompt\neffort: medium\nvariables:\n  topic: \"this project\"\n---\n\nSummarize {{topic}}.\n";
 
 function PromptLibraryView({ root, api, onUse, refreshKey }: PromptLibraryProps) {
   const [prompts, setPrompts] = useState<PromptSummary[] | null>(null);
@@ -138,7 +139,7 @@ function PromptLibraryView({ root, api, onUse, refreshKey }: PromptLibraryProps)
     <section className="tool-pane" aria-label="Prompt library">
       <header className="tool-heading">
         <h2>Prompt Library</h2>
-        <div className="tool-actions">
+        <Group gap={2} wrap="nowrap">
           <ActionIcon
             size="sm"
             disabled={Boolean(draft) || busy}
@@ -154,123 +155,141 @@ function PromptLibraryView({ root, api, onUse, refreshKey }: PromptLibraryProps)
           <ActionIcon size="sm" disabled={Boolean(draft) || busy} onClick={refreshPrompts} aria-label="Reload prompts" title="Reload prompts">
             <ArrowClockwise size={13} />
           </ActionIcon>
-        </div>
+        </Group>
       </header>
-      <div className="tool-scroll prompt-scroll">
-        {listError && <Alert color="red" variant="light" mb="xs">{listError}</Alert>}
-        {!draft && (
-          <>
-            {prompts?.length ? (
-              <Select
-                label="Template"
-                size="xs"
-                placeholder="Select a template"
-                value={choice || null}
-                disabled={busy}
-                data={selectData}
-                allowDeselect
-                onChange={(value) => setChoice(value ?? "")}
-              />
-            ) : !listError && (
-              prompts ? <div className="prompt-empty"><BookOpen size={20} weight="duotone" /><p>No prompt templates yet</p></div> : <p className="editor-note" role="status">Loading prompts…</p>
-            )}
-            {choice && !document && !documentError && <p className="editor-note" role="status">Loading template…</p>}
-            {document && refKey(document.ref) === choice && (
-              <form className="prompt-form" onSubmit={usePrompt}>
-                <div className="prompt-meta">
-                  <span title={document.ref.path}>{document.ref.path}</span>
-                  <ActionIcon
-                    size="sm"
-                    disabled={busy}
-                    aria-label="Edit prompt source"
-                    title="Edit prompt source"
-                    onClick={() => {
-                      setDocumentError("");
-                      setDraft({ ref: document.ref, source: document.source, revision: document.revision });
-                    }}
-                  >
-                    <PencilSimple size={13} />
-                  </ActionIcon>
-                </div>
-                {document.parseError ? <Alert color="red" variant="light">{document.parseError}</Alert> : (
-                  <Stack gap="xs">
-                    <pre className="prompt-preview">{document.body}</pre>
-                    {document.variables.map(({ name }) => (
-                      <Textarea
-                        key={name}
-                        label={name}
-                        size="xs"
-                        rows={2}
-                        value={values[name] ?? ""}
-                        disabled={busy}
-                        onChange={(event) => setValues({ ...values, [name]: event.currentTarget.value })}
-                      />
-                    ))}
-                    <Group>
-                      <Button
-                        type="submit"
-                        color="iris"
-                        size="compact-xs"
-                        loading={busy}
-                        rightSection={<ArrowUpRight size={14} />}
-                      >
-                        Use prompt
-                      </Button>
-                    </Group>
+      <ScrollArea className="tool-scroll" type="auto">
+        <Stack gap="xs" p="sm">
+          {listError && <Alert color="red" variant="light">{listError}</Alert>}
+          {!draft && (
+            <>
+              {prompts?.length ? (
+                <Select
+                  label="Template"
+                  size="xs"
+                  placeholder="Select a template"
+                  value={choice || null}
+                  disabled={busy}
+                  data={selectData}
+                  allowDeselect
+                  onChange={(value) => setChoice(value ?? "")}
+                />
+              ) : !listError && (
+                prompts ? (
+                  <Stack align="center" gap="xs" py="xl">
+                    <BookOpen size={22} weight="duotone" color="var(--muted)" />
+                    <Text size="xs" c="dimmed">No prompt templates yet</Text>
                   </Stack>
-                )}
-              </form>
-            )}
-          </>
-        )}
-        {draft && (
-          <form className="prompt-form" onSubmit={saveSource}>
-            <Stack gap="xs">
-              {draft.revision === undefined ? (
-                <>
-                  <Select
-                    label="Library"
-                    size="xs"
-                    value={draft.ref.scope}
-                    disabled={busy}
-                    data={[
-                      ...(root ? [{ value: "project", label: "Project" }] : []),
-                      { value: "global", label: "Global" },
-                    ]}
-                    onChange={(value) => setDraft({ ...draft, ref: { ...draft.ref, scope: value === "global" ? "global" : "project" } })}
-                  />
-                  <TextInput
-                    label="Filename"
-                    size="xs"
-                    value={draft.ref.path}
-                    placeholder="review.prompt.md"
-                    required
-                    disabled={busy}
-                    onChange={(event) => setDraft({ ...draft, ref: { ...draft.ref, path: event.currentTarget.value } })}
-                  />
-                </>
-              ) : <div className="prompt-meta"><span>{draft.ref.path}</span></div>}
-              <Textarea
-                label="Markdown source"
-                size="xs"
-                classNames={{ input: "prompt-source" }}
-                rows={9}
-                value={draft.source}
-                required
-                disabled={busy}
-                onChange={(event) => setDraft({ ...draft, source: event.currentTarget.value })}
-              />
-              <Group gap="xs">
-                <Button type="submit" color="iris" size="compact-xs" loading={busy}>Save prompt</Button>
-                <Button variant="default" size="compact-xs" disabled={busy} onClick={() => { setDraft(null); setDocumentError(""); }}>
-                  Cancel
-                </Button>
-              </Group>
-            </Stack>
-          </form>
-        )}
-        {documentError && <Alert color="red" variant="light" mt="xs">{documentError}</Alert>}
-      </div>
+                ) : <Text size="xs" c="dimmed" role="status">Loading prompts…</Text>
+              )}
+              {choice && !document && !documentError && <Text size="xs" c="dimmed" role="status">Loading template…</Text>}
+              {document && refKey(document.ref) === choice && (
+                <form onSubmit={usePrompt}>
+                  <Stack gap="xs">
+                    <Group justify="space-between" wrap="nowrap" gap="xs">
+                      <Group gap={6} wrap="wrap" style={{ minWidth: 0 }}>
+                        <Text size="11px" ff="monospace" c="dimmed" truncate="end" title={document.ref.path}>
+                          {document.ref.path}
+                        </Text>
+                        {document.providerId && <Badge size="xs" variant="outline" color="gray">{document.providerId}</Badge>}
+                        {document.effort && <Badge size="xs" variant="light" color="iris">{EFFORT_META[document.effort].label}</Badge>}
+                        {document.mode && <Badge size="xs" variant="light" color="gray">{document.mode}</Badge>}
+                      </Group>
+                      <ActionIcon
+                        size="sm"
+                        disabled={busy}
+                        aria-label="Edit prompt source"
+                        title="Edit prompt source"
+                        onClick={() => {
+                          setDocumentError("");
+                          setDraft({ ref: document.ref, source: document.source, revision: document.revision });
+                        }}
+                      >
+                        <PencilSimple size={13} />
+                      </ActionIcon>
+                    </Group>
+                    {document.parseError ? <Alert color="red" variant="light">{document.parseError}</Alert> : (
+                      <Stack gap="xs">
+                        <Paper p="xs" withBorder bg="dark.9">
+                          <pre className="prompt-preview">{document.body}</pre>
+                        </Paper>
+                        {document.variables.map(({ name }) => (
+                          <Textarea
+                            key={name}
+                            label={name}
+                            size="xs"
+                            rows={2}
+                            value={values[name] ?? ""}
+                            disabled={busy}
+                            onChange={(event) => setValues({ ...values, [name]: event.currentTarget.value })}
+                          />
+                        ))}
+                        <Group>
+                          <Button
+                            type="submit"
+                            color="iris"
+                            size="compact-xs"
+                            loading={busy}
+                            rightSection={<ArrowUpRight size={14} />}
+                          >
+                            Use prompt
+                          </Button>
+                        </Group>
+                      </Stack>
+                    )}
+                  </Stack>
+                </form>
+              )}
+            </>
+          )}
+          {draft && (
+            <form onSubmit={saveSource}>
+              <Stack gap="xs">
+                {draft.revision === undefined ? (
+                  <>
+                    <Select
+                      label="Library"
+                      size="xs"
+                      value={draft.ref.scope}
+                      disabled={busy}
+                      data={[
+                        ...(root ? [{ value: "project", label: "Project" }] : []),
+                        { value: "global", label: "Global" },
+                      ]}
+                      onChange={(value) => setDraft({ ...draft, ref: { ...draft.ref, scope: value === "global" ? "global" : "project" } })}
+                    />
+                    <TextInput
+                      label="Filename"
+                      size="xs"
+                      value={draft.ref.path}
+                      placeholder="review.prompt.md"
+                      required
+                      disabled={busy}
+                      onChange={(event) => setDraft({ ...draft, ref: { ...draft.ref, path: event.currentTarget.value } })}
+                    />
+                  </>
+                ) : <Text size="11px" ff="monospace" c="dimmed">{draft.ref.path}</Text>}
+                <Textarea
+                  label="Markdown source"
+                  size="xs"
+                  classNames={{ input: "prompt-source" }}
+                  rows={9}
+                  value={draft.source}
+                  required
+                  disabled={busy}
+                  onChange={(event) => setDraft({ ...draft, source: event.currentTarget.value })}
+                />
+                <Group gap="xs">
+                  <Button type="submit" color="iris" size="compact-xs" loading={busy}>Save prompt</Button>
+                  <Button variant="default" size="compact-xs" disabled={busy} onClick={() => { setDraft(null); setDocumentError(""); }}>
+                    Cancel
+                  </Button>
+                </Group>
+              </Stack>
+            </form>
+          )}
+          {documentError && <Alert color="red" variant="light">{documentError}</Alert>}
+        </Stack>
+      </ScrollArea>
     </section>
   );
 }

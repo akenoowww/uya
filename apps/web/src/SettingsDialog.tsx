@@ -1,14 +1,14 @@
-import { useImperativeHandle, useState } from "react";
+import { useEffect, useImperativeHandle, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ActionIcon, Alert, Badge, Button, Checkbox, Code, Divider, Group, Kbd,
-  Modal, NumberInput, Paper, ScrollArea, Select, Stack, Tabs, Text, Textarea, TextInput,
+  Modal, NumberInput, Paper, Progress, ScrollArea, SegmentedControl, Select, SimpleGrid, Stack, Tabs, Text, Textarea, TextInput,
 } from "@mantine/core";
 import {
-  ArrowClockwise, CaretRight, Keyboard, PencilSimple, PlugsConnected,
+  ArrowClockwise, CaretRight, ChartBar, Keyboard, PencilSimple, PlugsConnected,
   Plus, SlidersHorizontal, Trash,
 } from "@phosphor-icons/react";
-import type { CustomProviderInput, Provider, RoutingRule, RpcCall } from "@ide/protocol";
+import type { CustomProviderInput, Provider, RoutingRule, RpcCall, UsageStats } from "@ide/protocol";
 import { errorMessage } from "./bridge";
 import { ProviderIcon } from "./components/ProviderIcon";
 import { isMac, SHORTCUTS } from "./shortcuts";
@@ -25,10 +25,11 @@ interface Props {
 export interface SettingsControls {
   showProviders: () => void;
   showRules: () => void;
+  showUsage: () => void;
   showShortcuts: () => void;
 }
 
-type SettingsTab = "providers" | "rules" | "shortcuts";
+type SettingsTab = "providers" | "rules" | "usage" | "shortcuts";
 type ProviderAction = { kind: "create" } | { kind: "edit" | "remove"; provider: Provider };
 
 function CustomProviderForm({ provider, busy, onSave, onCancel }: {
@@ -119,6 +120,131 @@ function CustomProviderForm({ provider, busy, onSave, onCancel }: {
   );
 }
 
+function UsagePanel({ rpc, active }: { rpc: RpcCall | undefined; active: boolean }) {
+  const [days, setDays] = useState("30");
+  const [stats, setStats] = useState<UsageStats | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!active || !rpc) return;
+    let current = true;
+    setError("");
+    void rpc("runs.usage", { days: Number(days) }).then((result) => {
+      if (current) setStats(result);
+    }).catch((reason: unknown) => {
+      if (current) setError(errorMessage(reason));
+    });
+    return () => { current = false; };
+  }, [active, days, rpc]);
+
+  const totals = stats ? stats.byProvider.reduce(
+    (acc, row) => ({
+      succeeded: acc.succeeded + row.succeeded,
+      tokens: acc.tokens + row.inputTokens + row.outputTokens,
+      ttftWeighted: acc.ttftWeighted + (row.avgTtftMs ?? 0) * (row.avgTtftMs !== undefined ? row.runs : 0),
+      ttftRuns: acc.ttftRuns + (row.avgTtftMs !== undefined ? row.runs : 0),
+    }),
+    { succeeded: 0, tokens: 0, ttftWeighted: 0, ttftRuns: 0 },
+  ) : null;
+  const overallSuccess = stats && stats.totalRuns > 0 && totals ? Math.round((totals.succeeded / stats.totalRuns) * 100) : 0;
+  const overallTtft = totals && totals.ttftRuns > 0 ? Math.round(totals.ttftWeighted / totals.ttftRuns) : undefined;
+
+  return (
+    <Stack gap="sm">
+      <Group justify="space-between" align="center">
+        <Text size="xs" c="dimmed">
+          Local speed, token throughput, and effort usage from your SQLite history.
+        </Text>
+        <SegmentedControl
+          size="xs"
+          value={days}
+          onChange={setDays}
+          data={[
+            { value: "7", label: "7d" },
+            { value: "30", label: "30d" },
+            { value: "90", label: "90d" },
+          ]}
+        />
+      </Group>
+
+      {error && <Alert color="red" variant="light">{error}</Alert>}
+      {!rpc && !error && <Text size="xs" c="dimmed">Connect to the desktop runtime to view local usage metrics.</Text>}
+      {rpc && !stats && !error && <Text size="xs" c="dimmed">Loading metrics…</Text>}
+      {stats && (
+        <ScrollArea.Autosize mah="46vh" type="auto">
+          {!stats.byProvider.length ? (
+            <Text size="xs" c="dimmed" py="md">No runs recorded in the last {stats.days} days.</Text>
+          ) : (
+            <Stack gap="xs">
+              <SimpleGrid cols={4} spacing="xs">
+                <Paper p="xs" withBorder bg="dark.8">
+                  <Text size="10px" c="dimmed" tt="uppercase">Runs</Text>
+                  <Text size="md" fw={650} ff="monospace">{stats.totalRuns}</Text>
+                </Paper>
+                <Paper p="xs" withBorder bg="dark.8">
+                  <Text size="10px" c="dimmed" tt="uppercase">Success</Text>
+                  <Text size="md" fw={650} ff="monospace" c={overallSuccess >= 90 ? "teal" : "yellow"}>{overallSuccess}%</Text>
+                </Paper>
+                <Paper p="xs" withBorder bg="dark.8">
+                  <Text size="10px" c="dimmed" tt="uppercase">Avg TTFT</Text>
+                  <Text size="md" fw={650} ff="monospace">{overallTtft !== undefined ? `${overallTtft}ms` : "—"}</Text>
+                </Paper>
+                <Paper p="xs" withBorder bg="dark.8">
+                  <Text size="10px" c="dimmed" tt="uppercase">Tokens</Text>
+                  <Text size="md" fw={650} ff="monospace">{totals ? totals.tokens.toLocaleString() : 0}</Text>
+                </Paper>
+              </SimpleGrid>
+
+              {stats.byProvider.map((row) => {
+                const rate = row.runs > 0 ? Math.round((row.succeeded / row.runs) * 100) : 0;
+                const share = stats.totalRuns > 0 ? Math.round((row.runs / stats.totalRuns) * 100) : 0;
+                const effortEntries = Object.entries(row.efforts);
+                return (
+                  <Paper key={row.providerId} p="xs" withBorder radius="sm" bg="dark.8">
+                    <Group justify="space-between" wrap="nowrap" mb={4}>
+                      <Group gap={8} wrap="nowrap">
+                        <ProviderIcon providerId={row.providerId} size={14} framed={false} />
+                        <Text size="xs" fw={620}>{row.providerName}</Text>
+                      </Group>
+                      <Group gap={6}>
+                        <Badge size="xs" variant="light" color="iris">{row.runs} runs</Badge>
+                        <Badge size="xs" variant="light" color={rate >= 90 ? "teal" : rate >= 70 ? "yellow" : "red"}>
+                          {rate}% ok
+                        </Badge>
+                      </Group>
+                    </Group>
+                    <Progress value={share} size={4} color="iris" mb={6} radius="xl" />
+                    <Group gap="md" wrap="wrap">
+                      <Text size="11px" c="dimmed" ff="monospace">
+                        Avg TTFT: {row.avgTtftMs !== undefined ? `${row.avgTtftMs} ms` : "—"}
+                      </Text>
+                      <Text size="11px" c="dimmed" ff="monospace">
+                        In: {row.inputTokens.toLocaleString()} tok
+                      </Text>
+                      <Text size="11px" c="dimmed" ff="monospace">
+                        Out: {row.outputTokens.toLocaleString()} tok
+                      </Text>
+                    </Group>
+                    {effortEntries.length > 0 && (
+                      <Group gap={4} mt={6} wrap="wrap">
+                        {effortEntries.map(([level, count]) => (
+                          <Badge key={level} size="xs" variant="outline" color="gray" radius="sm">
+                            {level}: {count}
+                          </Badge>
+                        ))}
+                      </Group>
+                    )}
+                  </Paper>
+                );
+              })}
+            </Stack>
+          )}
+        </ScrollArea.Autosize>
+      )}
+    </Stack>
+  );
+}
+
 export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onRules }: Props & {
   controls: React.RefObject<SettingsControls | null>;
 }) {
@@ -141,6 +267,7 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
   useImperativeHandle(controls, () => ({
     showProviders: () => open("providers"),
     showRules: () => open("rules"),
+    showUsage: () => open("usage"),
     showShortcuts: () => open("shortcuts"),
   }), [rules]);
 
@@ -186,7 +313,9 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
       ? "Providers"
       : tab === "rules"
         ? "Routing rules"
-        : "Keyboard shortcuts";
+        : tab === "usage"
+          ? "Usage & Speed Insights"
+          : "Keyboard shortcuts";
 
   return (
     <Modal opened={opened} onClose={() => setOpened(false)} title={title} size={660}>
@@ -219,6 +348,9 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
             <Tabs.Tab value="rules" leftSection={<SlidersHorizontal size={14} weight="duotone" />}>
               Routing rules
             </Tabs.Tab>
+            <Tabs.Tab value="usage" leftSection={<ChartBar size={14} weight="duotone" />}>
+              Usage
+            </Tabs.Tab>
             <Tabs.Tab value="shortcuts" leftSection={<Keyboard size={14} weight="duotone" />}>
               Shortcuts
             </Tabs.Tab>
@@ -235,7 +367,7 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
                 {providers.map((provider) => (
                   <div className="provider-row" key={provider.id}>
                     <span className={`state-dot ${provider.available ? "connected" : ""}`} />
-                    <ProviderIcon providerId={provider.id} size={14} />
+                    <ProviderIcon providerId={provider.id} size={16} />
                     <div className="provider-row-info">
                       <strong>{provider.name}</strong>
                       <small>
@@ -406,6 +538,10 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
                 </Button>
               </Group>
             </form>
+          </Tabs.Panel>
+
+          <Tabs.Panel value="usage">
+            <UsagePanel rpc={rpc} active={opened && tab === "usage"} />
           </Tabs.Panel>
 
           <Tabs.Panel value="shortcuts">

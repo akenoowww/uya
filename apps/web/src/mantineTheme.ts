@@ -65,6 +65,49 @@ export const uyaTheme = createTheme({
         color: "gray",
       },
     },
+    Badge: {
+      defaultProps: {
+        radius: "sm",
+      },
+    },
+    Paper: {
+      defaultProps: {
+        radius: "sm",
+      },
+    },
+    ScrollArea: {
+      defaultProps: {
+        scrollbarSize: 6,
+      },
+    },
+    Menu: {
+      defaultProps: {
+        radius: "md",
+        shadow: "lg",
+        withinPortal: true,
+      },
+      styles: {
+        dropdown: {
+          backgroundColor: "#1b1d25",
+          borderColor: "#3c3f50",
+        },
+        item: {
+          fontSize: "12px",
+        },
+      },
+    },
+    SegmentedControl: {
+      defaultProps: {
+        size: "xs",
+        radius: "sm",
+      },
+      styles: {
+        root: {
+          backgroundColor: "#14151b",
+          border: "1px solid #272933",
+        },
+      },
+    },
     Tooltip: {
       defaultProps: {
         openDelay: 360,
@@ -116,10 +159,10 @@ export const uyaTheme = createTheme({
         header: {
           backgroundColor: "#1b1c24",
           borderBottom: "1px solid #272933",
-          padding: "14px 16px",
+          padding: "12px 16px",
         },
         title: {
-          fontSize: "15px",
+          fontSize: "14px",
           fontWeight: 640,
         },
       },

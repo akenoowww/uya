@@ -1,29 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ActionIcon, Badge, Button, Group, Kbd } from "@mantine/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ActionIcon, Badge, Button, Collapse, Group, Kbd, Loader, Paper, Stack, Text, UnstyledButton,
+} from "@mantine/core";
 import { useClipboard } from "@mantine/hooks";
 import {
-  ArrowClockwise, ArrowDown, ArrowUp, Check, Copy, Files, Lightning,
-  NotePencil, StopCircle, TerminalWindow,
+  ArrowClockwise, ArrowDown, ArrowUp, CaretDown, CaretRight, Check, Copy, Files,
+  GitFork, Lightning, NotePencil, Play, Stop, StopCircle, TerminalWindow,
 } from "@phosphor-icons/react";
-import type { Provider, RunDetail, RunEvent, RunSummary } from "@ide/protocol";
+import type { EffortLevel, Provider, RpcCall, RunDetail, RunEvent, RunSummary } from "@ide/protocol";
 import type { Bridge } from "./bridge";
+import { EFFORT_META, EffortPicker } from "./components/EffortPicker";
 import { MarkdownView } from "./components/MarkdownView";
+import type { ApplyPreviewRequest } from "./components/MarkdownView";
+import { MentionMenu } from "./components/MentionMenu";
 import { ModelPicker } from "./components/ModelPicker";
 import { ProviderIcon } from "./components/ProviderIcon";
 import { ProviderPicker } from "./components/ProviderPicker";
 import { SlashMenu } from "./components/SlashMenu";
 import { HintTooltip } from "./components/Tooltip";
+import { useMentionInput } from "./hooks/useMentionInput";
 import { useSlashInput } from "./hooks/useSlashInput";
 import { formatShortcut } from "./shortcuts";
 import { TerminalPanel } from "./TerminalPanel";
+import type { TerminalControls, TerminalStateSnapshot } from "./TerminalPanel";
 import { resolveModel, shortModelName } from "./workbenchStore";
+import type { PaneConfig } from "./workbenchStore";
 
-export interface PaneConfig {
-  conversationId?: string;
-  providerId?: string;
-  model?: string;
-  mode?: "structured" | "terminal";
-}
+export type { PaneConfig };
 
 function duration(milliseconds: number) {
   return milliseconds < 1000 ? `${Math.round(milliseconds)} ms` : `${(milliseconds / 1000).toFixed(1)} s`;
@@ -46,11 +49,55 @@ function groupEvents(events: RunEvent[]) {
   return groups;
 }
 
-function terminalArgsFor(provider: Provider | undefined, model: string | undefined): string[] | undefined {
+function DisclosureBlock({ type, text }: { type: "thinking" | "tool"; text: string }) {
+  const [opened, setOpened] = useState(false);
+  return (
+    <Paper withBorder bg="dark.9" radius="sm" my={6} className="disclosure-card">
+      <UnstyledButton
+        w="100%"
+        px={8}
+        py={5}
+        onClick={() => setOpened((current) => !current)}
+        aria-expanded={opened}
+      >
+        <Group gap={6} wrap="nowrap">
+          {opened ? <CaretDown size={11} weight="bold" color="var(--muted)" /> : <CaretRight size={11} weight="bold" color="var(--muted)" />}
+          <Lightning size={12} weight="duotone" color="var(--accent)" aria-hidden="true" />
+          <Text size="11px" c="dimmed" fw={550}>
+            {type === "thinking" ? "Reasoning" : "Activity"}
+          </Text>
+          {!opened && (
+            <Text size="10px" c="dimmed" truncate="end" style={{ opacity: 0.7 }}>
+              {text.split("\n")[0]}
+            </Text>
+          )}
+        </Group>
+      </UnstyledButton>
+      <Collapse expanded={opened}>
+        <pre className="disclosure-pre">{text}</pre>
+      </Collapse>
+    </Paper>
+  );
+}
+
+function terminalArgsFor(provider: Provider | undefined, model: string | undefined, effort: EffortLevel | undefined): string[] | undefined {
   if (!provider) return undefined;
   if (provider.id === "ollama" && model) return ["run", model];
-  if (provider.kind === "cli" && model && ["codex", "claude", "gemini", "qwen", "opencode", "kimi"].includes(provider.id)) {
-    return [...(provider.terminalArgs ?? []), "--model", model];
+  if (provider.kind === "cli") {
+    const args = [...(provider.terminalArgs ?? [])];
+    if (provider.id === "codex" && effort) {
+      const mapped = effort === "minimal" ? "low" : effort;
+      const quote = /\.(?:cmd|bat)$/i.test(provider.command ?? "") ? "'" : '"';
+      args.push("-c", `model_reasoning_effort=${quote}${mapped}${quote}`);
+    }
+    if (provider.id === "claude" && effort) {
+      const mapped = effort === "minimal" ? "low" : effort === "xhigh" ? "high" : effort;
+      args.push("--effort", mapped);
+    }
+    if (model && ["codex", "claude", "gemini", "qwen", "opencode", "kimi"].includes(provider.id)) {
+      args.push("--model", model);
+    }
+    return args.length ? args : provider.terminalArgs;
   }
   return provider.terminalArgs;
 }
@@ -59,10 +106,18 @@ export function Transcript({
   detail,
   providers,
   onRetry,
+  onFork,
+  onOpenUrl,
+  onOpenFile,
+  onPreviewDiff,
 }: {
   detail: RunDetail;
   providers: Provider[];
   onRetry?: (prompt: string) => void;
+  onFork?: (runId: string) => void;
+  onOpenUrl?: (url: string) => void;
+  onOpenFile?: (path: string, line?: number) => void;
+  onPreviewDiff?: (request: ApplyPreviewRequest) => void;
 }) {
   const clipboard = useClipboard({ timeout: 1600 });
   const { run, events } = detail;
@@ -84,56 +139,70 @@ export function Transcript({
       .join("");
   }, [detail]);
 
+  const elapsedMs = run.finishedAt ? Math.max(1, run.finishedAt - run.startedAt) : 0;
+  const tokPerSec = run.outputTokens && elapsedMs > 0
+    ? Math.round((run.outputTokens * 1000) / elapsedMs)
+    : undefined;
+
   return (
     <article className="transcript">
-      <div className="prompt-turn">
-        <span className="turn-role">You</span>
-        <p>{run.prompt}</p>
-      </div>
+      <Paper p="8px 11px" withBorder radius="md" className="prompt-turn">
+        <Text size="11px" fw={630} c="iris.3" mb={3}>You</Text>
+        <Text size="sm" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.55 }}>
+          {run.prompt}
+        </Text>
+      </Paper>
       <div className="response-turn">
         {attempts.map(({ run: attempt, events: output }, index) => {
           const providerName = attempt.providerName ?? providers.find((item) => item.id === attempt.providerId)?.name ?? attempt.providerId;
           const displayModel = (index === attempts.length - 1 ? run.model : undefined) ?? attempt.model;
+          const displayEffort = (index === attempts.length - 1 ? run.effort : undefined) ?? attempt.effort;
           const groups = groupEvents(output);
           const hasText = groups.some((group) => group.type === "text");
           return (
             <section className="response-attempt" key={`${attempt.providerId}-${index}`}>
-              <div className="response-byline">
-                <ProviderIcon providerId={attempt.providerId} size={13} />
-                <strong>{providerName}</strong>
+              <Group gap={7} align="center" wrap="nowrap">
+                <ProviderIcon providerId={attempt.providerId} size={14} framed={false} />
+                <Text size="xs" fw={620}>{providerName}</Text>
                 {displayModel && (
-                  <Badge size="xs" variant="outline" color="gray" radius="sm" ff="monospace">
+                  <Badge size="xs" variant="outline" color="gray" ff="monospace">
                     {shortModelName(displayModel)}
                   </Badge>
                 )}
-              </div>
+                {displayEffort && (
+                  <Badge size="xs" variant="light" color="iris">
+                    {EFFORT_META[displayEffort].short}
+                  </Badge>
+                )}
+              </Group>
               {groups.map((group) => group.type === "text" ? (
-                <MarkdownView key={group.seq} text={group.text} />
+                <MarkdownView
+                  key={group.seq}
+                  text={group.text}
+                  onOpenUrl={onOpenUrl}
+                  onOpenFile={onOpenFile}
+                  onPreviewDiff={onPreviewDiff}
+                />
               ) : (
-                <details className="run-disclosure" key={group.seq}>
-                  <summary>
-                    <Lightning size={12} weight="duotone" aria-hidden="true" />
-                    <span>{group.type === "thinking" ? "Reasoning" : "Activity"}</span>
-                  </summary>
-                  <pre>{group.text}</pre>
-                </details>
+                <DisclosureBlock key={group.seq} type={group.type} text={group.text} />
               ))}
               {!hasText && run.status === "running" && (
-                <p className="run-pending">
-                  <span className="pending-pulse" aria-hidden="true" />
-                  {groups.length ? "Thinking…" : "Waiting for response…"}
-                </p>
+                <Group gap={8} mt={10} mb={4}>
+                  <Loader size="xs" type="dots" color="iris" />
+                  <Text size="xs" c="dimmed">{groups.length ? "Thinking…" : "Waiting for response…"}</Text>
+                </Group>
               )}
             </section>
           );
         })}
-        {run.error && <p className="run-error" role="status">{run.error}</p>}
-        <div className="run-metadata">
+        {run.error && <Text size="xs" c="red.3" mt={8} role="status">{run.error}</Text>}
+        <Group gap={8} pt={8} wrap="wrap" className="run-metadata">
           <RunStatus run={run} />
-          {run.ttftMs !== undefined && <span>TTFT {duration(run.ttftMs)}</span>}
-          {run.finishedAt && <span>{duration(run.finishedAt - run.startedAt)}</span>}
-          {run.inputTokens !== undefined && <span>{run.inputTokens} in</span>}
-          {run.outputTokens !== undefined && <span>{run.outputTokens} out</span>}
+          {run.ttftMs !== undefined && <Text size="11px" c="dimmed" ff="monospace">TTFT {duration(run.ttftMs)}</Text>}
+          {run.finishedAt && <Text size="11px" c="dimmed" ff="monospace">{duration(run.finishedAt - run.startedAt)}</Text>}
+          {run.inputTokens !== undefined && <Text size="11px" c="dimmed" ff="monospace">{run.inputTokens} in</Text>}
+          {run.outputTokens !== undefined && <Text size="11px" c="dimmed" ff="monospace">{run.outputTokens} out</Text>}
+          {tokPerSec !== undefined && tokPerSec > 0 && <Text size="11px" c="dimmed" ff="monospace">{tokPerSec} tok/s</Text>}
           <span className="toolbar-spacer" />
           <Group gap={4} wrap="nowrap">
             {fullReplyText && (
@@ -146,6 +215,18 @@ export function Transcript({
                 aria-label="Copy response"
               >
                 {clipboard.copied ? "Copied" : "Copy"}
+              </Button>
+            )}
+            {onFork && run.conversationId && run.status === "succeeded" && (
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="gray"
+                leftSection={<GitFork size={12} />}
+                onClick={() => onFork(run.id)}
+                aria-label="Fork thread from this turn"
+              >
+                Fork
               </Button>
             )}
             {onRetry && run.status !== "running" && (
@@ -161,7 +242,7 @@ export function Transcript({
               </Button>
             )}
           </Group>
-        </div>
+        </Group>
       </div>
     </article>
   );
@@ -181,6 +262,7 @@ interface Props {
   contextCount: number;
   hasSelection: boolean;
   bridge: Bridge | null;
+  rpc: RpcCall | undefined;
   cwd: string | null;
   onDraftChange: (value: string) => void;
   onSend: (override?: string) => void;
@@ -189,25 +271,37 @@ interface Props {
   onNewConversation: () => void;
   onOpenProviders: () => void;
   onRefreshProviders?: () => Promise<void> | void;
+  onAttachFile: (path: string) => void;
+  onAttachGitDiff: (staged: boolean) => void;
+  onAttachTerminal: () => void;
+  onForkFromRun?: (runId: string) => void;
+  onOpenUrl?: (url: string) => void;
+  onOpenFile?: (path: string, line?: number) => void;
+  onPreviewDiff?: (request: ApplyPreviewRequest) => void;
 }
 
 export function RunPane({
   id, provider, providers, config, details, draft, promptHistory, busy, connected, choosingProject,
-  contextCount, hasSelection, bridge, cwd, onDraftChange, onSend, onConfig, onCancel,
-  onNewConversation, onOpenProviders, onRefreshProviders,
+  contextCount, hasSelection, bridge, rpc, cwd, onDraftChange, onSend, onConfig, onCancel,
+  onNewConversation, onOpenProviders, onRefreshProviders, onAttachFile, onAttachGitDiff, onAttachTerminal,
+  onForkFromRun, onOpenUrl, onOpenFile, onPreviewDiff,
 }: Props) {
   const transcript = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const terminalControls = useRef<TerminalControls | null>(null);
   const stickToEnd = useRef(true);
+  const [cursor, setCursor] = useState(0);
   const [showJump, setShowJump] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
+  const [terminalState, setTerminalState] = useState<TerminalStateSnapshot>({ running: false, hasStarted: false, status: "" });
 
   const last = details.at(-1);
   const lastRun = last?.run;
   const isRunning = lastRun?.status === "running";
   const mode = provider && !provider.structured && provider.terminal ? "terminal" : config.mode ?? "structured";
   const model = resolveModel(provider, config.model);
-  const terminalArgs = terminalArgsFor(provider, model);
+  const terminalArgs = terminalArgsFor(provider, model, config.effort);
+
   const slashInput = useSlashInput({
     value: draft,
     onChange: onDraftChange,
@@ -215,6 +309,22 @@ export function RunPane({
     onFocusInput: () => inputRef.current?.focus(),
     history: promptHistory,
   });
+
+  const mentionInput = useMentionInput({
+    value: draft,
+    cursor,
+    root: cwd,
+    rpc,
+    onChange: onDraftChange,
+    onAttachFile,
+    onAttachGitDiff,
+    onAttachTerminal,
+    onFocusInput: () => inputRef.current?.focus(),
+  });
+
+  const handleTerminalState = useCallback((next: TerminalStateSnapshot) => {
+    setTerminalState(next);
+  }, []);
 
   useEffect(() => {
     stickToEnd.current = true;
@@ -244,7 +354,7 @@ export function RunPane({
         <ProviderPicker
           value={provider?.id}
           providers={providers}
-          onChange={(providerId) => onConfig({ providerId, model: undefined, mode: "structured" })}
+          onChange={(providerId) => onConfig({ providerId, model: undefined, effort: undefined, mode: "structured" })}
         />
         <ModelPicker
           paneId={id}
@@ -253,7 +363,43 @@ export function RunPane({
           onChange={(nextModel) => onConfig({ model: nextModel })}
           onRefresh={connected ? onRefreshProviders : undefined}
         />
+        <EffortPicker
+          paneId={id}
+          provider={provider}
+          model={model}
+          effort={config.effort}
+          onChange={(effort) => onConfig({ effort })}
+        />
         <span className="toolbar-spacer" />
+
+        {mode === "terminal" && provider?.terminal && (
+          <Group gap={5} wrap="nowrap">
+            {terminalState.status && <span className="terminal-status-inline">{terminalState.status}</span>}
+            {terminalState.running ? (
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="red"
+                leftSection={<Stop size={11} weight="fill" />}
+                onClick={() => terminalControls.current?.stop()}
+              >
+                Stop
+              </Button>
+            ) : (
+              <Button
+                size="compact-xs"
+                variant="subtle"
+                color="iris"
+                disabled={!bridge}
+                leftSection={<Play size={11} weight="fill" />}
+                onClick={() => terminalControls.current?.start()}
+              >
+                {terminalState.hasStarted ? "Restart" : "Start"}
+              </Button>
+            )}
+          </Group>
+        )}
+
         {mode === "structured" && details.length > 0 && !isRunning && (
           <HintTooltip label="New conversation" shortcut={formatShortcut("new-conversation")}>
             <ActionIcon aria-label="New conversation" onClick={onNewConversation}>
@@ -261,23 +407,7 @@ export function RunPane({
             </ActionIcon>
           </HintTooltip>
         )}
-        {isRunning && lastRun && (
-          <HintTooltip label="Cancel run" shortcut={formatShortcut("cancel-run")}>
-            <ActionIcon
-              color="red"
-              variant="light"
-              aria-label="Cancel run"
-              disabled={cancelPending}
-              onClick={async () => {
-                setCancelPending(true);
-                await onCancel(lastRun.id);
-                setCancelPending(false);
-              }}
-            >
-              <StopCircle size={16} weight="duotone" />
-            </ActionIcon>
-          </HintTooltip>
-        )}
+
         {provider?.terminal && (
           <HintTooltip
             label={provider.structured ? "Toggle interactive terminal" : "Interactive terminal"}
@@ -305,6 +435,10 @@ export function RunPane({
           program={provider.command}
           args={terminalArgs}
           title={model ? `${provider.name} · ${shortModelName(model)}` : provider.name}
+          embedded
+          autoStart
+          controlsRef={terminalControls}
+          onStateChange={handleTerminalState}
         />
       )}
 
@@ -327,31 +461,37 @@ export function RunPane({
                   detail={detail}
                   providers={providers}
                   onRetry={provider?.structured && !busy ? (prompt) => onSend(prompt) : undefined}
+                  onFork={onForkFromRun}
+                  onOpenUrl={onOpenUrl}
+                  onOpenFile={onOpenFile}
+                  onPreviewDiff={onPreviewDiff}
                 />
               )) : (
-                <div className="pane-empty">
+                <Stack align="center" justify="center" gap="xs" flex={1} p="lg" ta="center">
                   <div className="empty-emblem">
-                    <ProviderIcon providerId={provider?.id} size={22} />
+                    <ProviderIcon providerId={provider?.id} size={36} framed />
                   </div>
-                  <strong>{provider?.structured ? `${provider.name} is ready` : "Connect a provider"}</strong>
-                  <span>
+                  <Text size="sm" fw={600}>
+                    {provider?.structured ? `${provider.name} is ready` : "Connect a provider"}
+                  </Text>
+                  <Text size="xs" c="dimmed" maw={340}>
                     {provider?.structured
-                      ? `Message ${provider.name}${model ? ` (${shortModelName(model)})` : ""} directly below, or use Broadcast.`
+                      ? `Ask ${provider.name}${model ? ` (${shortModelName(model)})` : ""} directly below, attach files with @, or broadcast across splits.`
                       : "Discover installed CLIs and local runtimes in Providers."}
-                  </span>
+                  </Text>
                   {provider?.structured && (
-                    <div className="empty-hints">
-                      <span><Kbd>↵</Kbd> Send</span>
-                      <span><Kbd>/</Kbd> Commands</span>
-                      <span><Kbd>{formatShortcut("palette")}</Kbd> Palette</span>
-                    </div>
+                    <Group gap="sm" mt={4} justify="center">
+                      <Group gap={5}><Kbd>↵</Kbd><Text size="11px" c="dimmed">Send</Text></Group>
+                      <Group gap={5}><Kbd>@</Kbd><Text size="11px" c="dimmed">Context</Text></Group>
+                      <Group gap={5}><Kbd>/</Kbd><Text size="11px" c="dimmed">Commands</Text></Group>
+                    </Group>
                   )}
                   {!provider && (
                     <Button variant="subtle" color="iris" size="compact-xs" onClick={onOpenProviders}>
                       Manage providers
                     </Button>
                   )}
-                </div>
+                </Stack>
               )}
             </div>
             {showJump && (
@@ -375,78 +515,95 @@ export function RunPane({
               selectedIndex={slashInput.activeSlashIndex}
               onSelect={slashInput.applySlashCommand}
             />
-            <form
-              className="pane-composer"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (!canSend) return;
-                slashInput.resetHistory();
-                onSend();
-              }}
-            >
-              <textarea
-                ref={inputRef}
-                rows={1}
-                className="pane-input"
-                data-pane-input={id}
-                aria-label={provider ? `Message ${provider.name}` : "Message split"}
-                value={draft}
-                onChange={(event) => slashInput.handleChange(event.target.value)}
-                onKeyDown={slashInput.handleKeyDown}
-                placeholder={
-                  provider?.structured
-                    ? `Message ${provider.name}${model ? ` (${shortModelName(model)})` : ""}… (↵ to send, / for commands)`
-                    : "Choose a structured provider…"
-                }
+            {!slashInput.slashMatches.length && (
+              <MentionMenu
+                items={mentionInput.mentionItems}
+                selectedIndex={mentionInput.activeMentionIndex}
+                onSelect={mentionInput.applyMention}
               />
-              <div className="pane-composer-actions">
-                {attachedCount > 0 && (
-                  <Badge
-                    size="xs"
-                    variant="light"
-                    color="iris"
-                    leftSection={<Files size={11} weight="duotone" />}
-                    title="Workspace context attached to next prompt"
-                  >
-                    {attachedCount}
-                  </Badge>
-                )}
-                {isRunning && lastRun ? (
-                  <ActionIcon
-                    size="sm"
-                    variant="light"
-                    color="red"
-                    aria-label="Cancel run"
-                    disabled={cancelPending}
-                    onClick={async () => {
-                      setCancelPending(true);
-                      await onCancel(lastRun.id);
-                      setCancelPending(false);
+            )}
+            <Paper withBorder radius="md" bg="dark.8" className="pane-composer-card">
+              <form
+                className="pane-composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!canSend) return;
+                  slashInput.resetHistory();
+                  onSend();
+                }}
+              >
+                <div className="growable-textarea" data-replicated-value={draft}>
+                  <textarea
+                    ref={inputRef}
+                    rows={1}
+                    className="pane-input"
+                    data-pane-input={id}
+                    aria-label={provider ? `Message ${provider.name}` : "Message split"}
+                    value={draft}
+                    onChange={(event) => {
+                      setCursor(event.target.selectionStart ?? event.target.value.length);
+                      slashInput.handleChange(event.target.value);
                     }}
-                  >
-                    <StopCircle size={15} weight="fill" />
-                  </ActionIcon>
-                ) : (
-                  <ActionIcon
-                    type="submit"
-                    size="sm"
-                    variant="filled"
-                    color="iris"
-                    aria-label={provider ? `Send to ${provider.name}` : "Send"}
-                    disabled={!canSend}
-                  >
-                    <ArrowUp size={13} weight="bold" color={canSend ? "#161025" : "currentColor"} />
-                  </ActionIcon>
-                )}
-              </div>
-            </form>
-            <div className="pane-footer">
-              <RunStatus run={lastRun} />
-              <span className="pane-footer-right">
-                {model ? <span className="footer-model">{shortModelName(model)}</span> : null}
-                <span>Read-only</span>
-              </span>
-            </div>
+                    onClick={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
+                    onKeyUp={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
+                    onKeyDown={(event) => {
+                      if (mentionInput.handleMentionKeyDown(event)) return;
+                      slashInput.handleKeyDown(event);
+                    }}
+                    placeholder={
+                      provider?.structured
+                        ? `Message ${provider.name}… (@ context, / commands)`
+                        : "Choose a structured provider…"
+                    }
+                  />
+                </div>
+                <Group gap={5} wrap="nowrap" pb={1}>
+                  {attachedCount > 0 && (
+                    <Badge
+                      size="xs"
+                      variant="light"
+                      color="iris"
+                      leftSection={<Files size={11} weight="duotone" />}
+                      title="Workspace context attached to next prompt"
+                    >
+                      {attachedCount}
+                    </Badge>
+                  )}
+                  {isRunning && lastRun ? (
+                    <HintTooltip label="Cancel run" shortcut={formatShortcut("cancel-run")}>
+                      <ActionIcon
+                        size="sm"
+                        variant="light"
+                        color="red"
+                        aria-label="Cancel run"
+                        disabled={cancelPending}
+                        onClick={async () => {
+                          setCancelPending(true);
+                          try {
+                            await onCancel(lastRun.id);
+                          } finally {
+                            setCancelPending(false);
+                          }
+                        }}
+                      >
+                        <StopCircle size={15} weight="fill" />
+                      </ActionIcon>
+                    </HintTooltip>
+                  ) : (
+                    <ActionIcon
+                      type="submit"
+                      size="sm"
+                      variant="filled"
+                      color="iris"
+                      aria-label={provider ? `Send to ${provider.name}` : "Send"}
+                      disabled={!canSend}
+                    >
+                      <ArrowUp size={13} weight="bold" color={canSend ? "#161025" : "currentColor"} />
+                    </ActionIcon>
+                  )}
+                </Group>
+              </form>
+            </Paper>
           </div>
         </>
       )}

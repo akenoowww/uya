@@ -1,20 +1,28 @@
 import type { DockviewApi, DockviewReadyEvent, SerializedDockview } from "dockview-react";
 import { shallow } from "zustand/vanilla/shallow";
-import type { PaneConfig } from "./RunPane";
+import type { DiffTarget } from "./DiffEditorPanel";
 import { workspaceLabel } from "./workbenchStore";
-import type { ChatPane, WorkbenchStore } from "./workbenchStore";
+import type { ChatPane, PaneConfig, WorkbenchStore } from "./workbenchStore";
 
 const layoutKey = "uya:dock-layout:v1";
 
-export type PaneParams = PaneConfig & { tool?: string; runId?: string; filePath?: string; workspacePath?: string };
+export type PaneParams = PaneConfig & {
+  tool?: string;
+  runId?: string;
+  filePath?: string;
+  revealLine?: number;
+  revealNonce?: number;
+  workspacePath?: string;
+  diffTarget?: DiffTarget;
+};
 
-function newConversationId() {
+export function newConversationId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function isEditor(id: string) {
-  return id === "editor" || id.startsWith("editor:");
+  return id === "editor" || id.startsWith("editor:") || id.startsWith("diff:");
 }
 
 function isRun(id: string) {
@@ -24,6 +32,8 @@ function isRun(id: string) {
 export function createDockLayout(store: WorkbenchStore) {
   let api: DockviewApi | undefined;
   let nextPane = 0;
+  let nextDiff = 0;
+  let nextReveal = 0;
   let lastEditorId: string | undefined;
   let lastChatPaneId: string | undefined;
   let layoutSubscription: { dispose(): void } | undefined;
@@ -69,12 +79,17 @@ export function createDockLayout(store: WorkbenchStore) {
     }
   }
 
-  function addRun(view: DockviewApi, reference?: string, direction: "right" | "below" = "right") {
+  function addRun(
+    view: DockviewApi,
+    reference?: string,
+    direction: "right" | "below" = "right",
+    initialConfig: Partial<PaneConfig> = {},
+  ) {
     let id: string;
     do { id = `run-${++nextPane}`; } while (view.getPanel(id));
     return view.addPanel({
       id, component: "pane", title: `Split ${nextPane}`, renderer: "always",
-      params: { conversationId: newConversationId() },
+      params: { conversationId: newConversationId(), ...initialConfig },
       minimumWidth: 260, minimumHeight: 190,
       position: reference ? { referencePanel: reference, direction } : undefined,
     });
@@ -134,23 +149,53 @@ export function createDockLayout(store: WorkbenchStore) {
     save();
   }
 
-  function openFile(path: string) {
+  function openFile(path: string, revealLine?: number) {
     const state = store.getState();
     if (!api || !state.workspace || state.choosingProject) return;
     const id = `editor:${path}`;
     const existing = api.getPanel(id);
+    const revealNonce = revealLine ? ++nextReveal : undefined;
     if (existing) {
+      if (revealLine) existing.api.updateParameters({ ...existing.params, revealLine, revealNonce });
       existing.api.setActive();
     } else {
       const previous = lastEditorId ? api.getPanel(lastEditorId) : undefined;
       const reference = previous ?? api.activePanel ?? api.panels[0];
       api.addPanel({
         id, title: workspaceLabel(path), component: "pane",
-        params: { tool: "editor", filePath: path, workspacePath: state.workspace.path },
+        params: { tool: "editor", filePath: path, revealLine, revealNonce, workspacePath: state.workspace.path },
         renderer: "always", minimumWidth: 210,
         position: reference ? { referencePanel: reference.id, direction: "within" } : undefined,
       });
     }
+    lastEditorId = id;
+    sync();
+  }
+
+  function openDiff(target: DiffTarget) {
+    const state = store.getState();
+    if (!api || !state.workspace || state.choosingProject) return;
+    const id = target.mode === "git"
+      ? `diff:git:${target.staged ? "staged" : "work"}:${target.path}`
+      : `diff:apply:${++nextDiff}:${target.path}`;
+    const existing = api.getPanel(id);
+    const label = `${workspaceLabel(target.path)} (${target.mode === "apply" ? "Apply" : target.staged ? "Staged" : "Diff"})`;
+    if (existing) {
+      existing.api.updateParameters({ ...existing.params, diffTarget: target });
+      existing.api.setActive();
+      return;
+    }
+    const previous = lastEditorId ? api.getPanel(lastEditorId) : undefined;
+    const reference = previous ?? api.activePanel ?? api.panels[0];
+    api.addPanel({
+      id,
+      title: label,
+      component: "pane",
+      params: { tool: "diff", filePath: target.path, workspacePath: state.workspace.path, diffTarget: target },
+      renderer: "always",
+      minimumWidth: 260,
+      position: reference ? { referencePanel: reference.id, direction: "within" } : undefined,
+    });
     lastEditorId = id;
     sync();
   }
@@ -185,25 +230,44 @@ export function createDockLayout(store: WorkbenchStore) {
     panel.api.setTitle(title);
   }
 
+  function newSplit(initialConfig: Partial<PaneConfig> = {}): string | undefined {
+    if (!api) return undefined;
+    const reference = api.activePanel?.id ?? api.panels[0]?.id;
+    const direction = store.getState().dock.chatPanes.length > 1 ? "below" : "right";
+    const created = addRun(api, reference, direction, initialConfig);
+    created.api.setActive();
+    sync();
+    save();
+    return created.id;
+  }
+
+  function openConversationSplit(conversationId: string, config: Partial<PaneConfig> = {}): string | undefined {
+    if (!api) return undefined;
+    const existing = api.panels.find((panel) => isRun(panel.id) && (panel.params as PaneConfig | undefined)?.conversationId === conversationId);
+    if (existing) {
+      if (Object.keys(config).length) {
+        existing.api.updateParameters({ ...existing.params, ...config });
+      }
+      existing.api.setActive();
+      sync();
+      save();
+      return existing.id;
+    }
+    return newSplit({ ...config, conversationId, mode: "structured" });
+  }
+
   return {
     ready,
     dispose,
     openFile,
+    openDiff,
     openTool,
     configure,
     setTitle,
     activate: (id: string) => api?.getPanel(id)?.api.setActive(),
     newConversation: (id: string) => configure(id, { conversationId: newConversationId() }),
-    newSplit(): string | undefined {
-      if (!api) return undefined;
-      const reference = api.activePanel?.id ?? api.panels[0]?.id;
-      const direction = store.getState().dock.chatPanes.length > 1 ? "below" : "right";
-      const created = addRun(api, reference, direction);
-      created.api.setActive();
-      sync();
-      save();
-      return created.id;
-    },
+    newSplit,
+    openConversationSplit,
     closeEditors() {
       for (const panel of api?.panels.filter(({ id }) => isEditor(id)) ?? []) api?.removePanel(panel);
       lastEditorId = undefined;

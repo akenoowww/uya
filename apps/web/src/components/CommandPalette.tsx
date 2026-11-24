@@ -3,7 +3,7 @@ import { Badge, Group, Kbd } from "@mantine/core";
 import { Spotlight, spotlight } from "@mantine/spotlight";
 import type { SpotlightActionData, SpotlightActionGroupData } from "@mantine/spotlight";
 import {
-  BookOpen, Broadcast, ClockCounterClockwise, Columns, ColumnsPlusRight, FolderOpen,
+  ArrowClockwise, BookOpen, Broadcast, ClockCounterClockwise, Columns, ColumnsPlusRight, FolderOpen,
   Keyboard, MagnifyingGlass, NotePencil, PlugsConnected, SlidersHorizontal,
   Sparkle, TerminalWindow,
 } from "@phosphor-icons/react";
@@ -21,7 +21,7 @@ export function openCommandPalette() {
   spotlight.open();
 }
 
-export function CommandPalette() {
+export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () => Promise<void> }) {
   const workbench = useWorkbench();
   const { dock, providers, chatPanes, activePane, activeProvider } = useWorkbenchState(useShallow((state) => {
     const active = activeChatPane(state.dock);
@@ -217,10 +217,17 @@ export function CommandPalette() {
         rightSection: <Kbd>{formatShortcut("shortcuts")}</Kbd>,
         onClick: () => workbench.openShortcuts(),
       },
+      ...(onCheckForUpdates ? [{
+        id: "check-for-updates",
+        label: "Check for Updates",
+        description: "Check for a new version of Uya",
+        leftSection: <ArrowClockwise size={15} weight="duotone" />,
+        onClick: () => void onCheckForUpdates(),
+      }] : []),
     ];
     groups.push({ group: "Actions", actions: actionItems });
     return groups;
-  }, [activePane, activeProvider, chatPanes, dock.activePaneId, providers, workbench]);
+  }, [activePane, activeProvider, chatPanes, dock.activePaneId, onCheckForUpdates, providers, workbench]);
 
   return (
     <Spotlight

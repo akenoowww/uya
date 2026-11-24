@@ -39,18 +39,18 @@ In **v0.1.0**, Uya lets you open a local project on **macOS** or **Windows 10/11
 Prebuilt desktop installers are published on [GitHub Releases](https://github.com/akenoowww/uya/releases/latest):
 
 ### macOS (13+)
-1. Download the `.dmg` (or `.app.zip`) for your Mac from [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0):
-   - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-0.1.0-macos-arm64.dmg`
-   - **Intel Mac**: `Uya-0.1.0-macos-x64.dmg`
+1. Download the `.dmg` (or `.app.zip`) for your Mac from the [latest release](https://github.com/akenoowww/uya/releases/latest):
+   - **Apple Silicon (M1 / M2 / M3 / M4)**: `Uya-<version>-macos-arm64.dmg`
+   - **Intel Mac**: `Uya-<version>-macos-x64.dmg`
 2. Open the `.dmg` and drag **Uya** into **Applications**.
 3. If macOS Gatekeeper blocks the first launch, verify the download and follow [Apple's Open Anyway instructions](https://support.apple.com/en-us/102445).
 
 ### Windows (10 / 11, 64-bit)
-1. Download the installer from [Releases → v0.1.0](https://github.com/akenoowww/uya/releases/tag/v0.1.0):
-   - **Recommended (per-user, no admin required)**: `Uya-0.1.0-windows-x64-setup.exe`
-   - **MSI package**: `Uya-0.1.0-windows-x64.msi`
+1. Download the installer from the [latest release](https://github.com/akenoowww/uya/releases/latest):
+   - **Recommended (per-user, no admin required)**: `Uya-<version>-windows-x64-setup.exe`
+   - **MSI package**: `Uya-<version>-windows-x64.msi`
 2. Run the installer (WebView2 is included on Windows 11 and bootstrapped automatically on Windows 10 if needed).
-3. The installers are unsigned. If SmartScreen displays *"Windows protected your PC"*, verify the download before selecting **More info → Run anyway**.
+3. If SmartScreen displays *"Windows protected your PC"*, verify the download before selecting **More info → Run anyway**.
 
 ### Verify Checksums (Optional)
 
@@ -63,8 +63,12 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 On Windows, compare the output with the matching line in `SHA256SUMS.txt`:
 
 ```powershell
-Get-FileHash .\Uya-0.1.0-windows-x64-setup.exe -Algorithm SHA256
+Get-ChildItem Uya-*-windows-x64-setup.exe | Get-FileHash -Algorithm SHA256
 ```
+
+### In-app updates
+
+Uya checks for updates in the background and shows **Restart to Update** after it downloads and verifies a new version. Run **Check for Updates** from the command palette to check manually. If you installed `0.1.0`, download and install the first release with update support from GitHub Releases once.
 
 ## Build from Source
 
@@ -86,6 +90,12 @@ bun run desktop:build
 ```
 
 Tauri outputs `Uya.app` & `.dmg` on macOS, and NSIS `.exe` & `.msi` installers on Windows.
+
+### Publish releases with updates
+
+Configure a [Tauri update signing key pair](https://v2.tauri.app/plugin/updater/#signing-updates) in GitHub Actions. Put the public `.pub` file contents in the repository variable `TAURI_UPDATER_PUBLIC_KEY`. Set the repository secret `TAURI_SIGNING_PRIVATE_KEY` and, for a password-protected key, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Keep the same key pair across releases so installed copies can verify future updates.
+
+Push a `vX.Y.Z` tag matching the app version. The release workflow verifies the signed packages for both Mac architectures and both Windows installer types before publishing `latest.json` with the installers. Uya reads this manifest from the latest stable GitHub release.
 
 ## Quick Workflow
 

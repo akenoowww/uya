@@ -2,6 +2,7 @@
 
 mod sidecar;
 mod terminal;
+mod updater;
 mod workspace;
 
 use sidecar::{Connection, Sidecar};
@@ -69,6 +70,11 @@ fn main() {
         .manage(Workspace::default())
         .invoke_handler(tauri::generate_handler![
             get_core_connection,
+            updater::get_app_update_info,
+            #[cfg(any(target_os = "macos", windows))]
+            updater::prepare_app_update,
+            #[cfg(any(target_os = "macos", windows))]
+            updater::install_app_update,
             workspace::select_workspace,
             workspace::activate_workspace,
             terminal::pty_open,
@@ -77,6 +83,8 @@ fn main() {
             terminal::pty_close
         ])
         .setup(|app| {
+            #[cfg(any(target_os = "macos", windows))]
+            updater::configure(app)?;
             let window_config = &app.config().app.windows[0];
             WebviewWindowBuilder::from_config(app, window_config)?
                 .on_navigation(|url| {
@@ -100,8 +108,12 @@ fn main() {
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
-            app.state::<Arc<Terminals>>().shutdown();
-            app.state::<Arc<Sidecar>>().shutdown();
+            shutdown_native_services(app);
         }
     });
+}
+
+fn shutdown_native_services(app: &tauri::AppHandle) {
+    app.state::<Arc<Terminals>>().shutdown();
+    app.state::<Arc<Sidecar>>().shutdown();
 }

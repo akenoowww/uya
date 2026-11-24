@@ -112,7 +112,7 @@ Follow the [release process](CONTRIBUTING.md#publishing-a-release). The release 
 | --- | --- | --- |
 | **Codex** | `exec --json` in read-only sandbox | Yes |
 | **Claude Code** | `stream-json` with tools and project settings disabled | Yes |
-| **Gemini CLI** | `stream-json` with tools disabled (managed system settings via PTY) | Yes |
+| **Gemini API (`gemini-api`)** | Stateless Interactions API streaming (`generate --no-interactive -o json`) with live API model & thinking discovery | Yes (`gemini-api explore`) |
 | **Qwen Code** | `stream-json` in `--safe-mode` with `0` tool calls | Yes |
 | **OpenCode** | `run --format json --pure` with isolated config & CLI environment auth | Yes (including saved login & managed settings) |
 | **Ollama** | Local HTTP streaming for installed weights | Yes (when `ollama` is installed) |

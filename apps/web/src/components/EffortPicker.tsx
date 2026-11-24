@@ -17,7 +17,7 @@ export const ALL_EFFORTS: readonly EffortLevel[] = ["minimal", "low", "medium", 
 
 export function resolveSupportedEfforts(provider: Provider | undefined, model: string | undefined): EffortLevel[] {
   if (!provider) return [];
-  if (model && provider.modelEfforts?.[model]?.length) {
+  if (model && provider.modelEfforts && Object.hasOwn(provider.modelEfforts, model)) {
     return provider.modelEfforts[model];
   }
   return provider.supportedEfforts ?? [];

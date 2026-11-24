@@ -9,7 +9,7 @@ import { discoverCliModels, isSafeCliModelName, normalizeEffortLevel, type CliMo
 
 const codexFallback: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 const claudeEfforts: EffortLevel[] = ["low", "medium", "high", "max"];
-const geminiEfforts: EffortLevel[] = ["minimal", "low", "medium", "high", "max"];
+const geminiEfforts: EffortLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 function fixtureEnv(): NodeJS.ProcessEnv {
   if (process.platform !== "win32") return {};
@@ -292,39 +292,35 @@ rl.on("line", (line) => {
   }
 });
 
-test("discovers Gemini models via ACP session/new and ignores stdout noise", async () => {
-  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-"));
+test("discovers live Gemini API models, thinking capabilities, and schema effort levels", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-api-"));
   try {
-    const command = await createFakeCli(fixture, "gemini", `
-import readline from "node:readline";
+    const command = await createFakeCli(fixture, "gemini-api", `
 const args = process.argv.slice(2);
-if (!args.includes("--acp") || args.includes("--output-format")) process.exit(2);
-if (process.env.NO_BROWSER !== "true") process.exit(3);
-console.log("non-json startup banner");
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === "initialize") {
-    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }));
-  } else if (msg.method === "session/new") {
-    console.log(JSON.stringify({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        sessionId: "sess-1",
-        models: {
-          currentModelId: "auto",
-          availableModels: [
-            { modelId: "auto", name: "Auto" },
-            { modelId: "gemini-3.1-pro-preview" },
-            { modelId: "gemini-3.5-flash" },
-            { modelId: "--flag-injection" },
-          ],
-        },
-      },
-    }));
-  }
-});
+if (args[0] === "models" && args[1] === "list") {
+  console.log(JSON.stringify({
+    models: [
+      { name: "models/gemini-4-hydrogen", supportedGenerationMethods: ["generateContent"], thinking: true },
+      { name: "models/gemini-4-neon", supportedGenerationMethods: ["generateContent"], thinking: true },
+      { name: "models/gemma-4-31b-it", supportedGenerationMethods: ["generateContent"], thinking: false },
+      { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
+      { name: "models/--flag-injection", supportedGenerationMethods: ["generateContent"] },
+    ],
+  }));
+} else if (args[0] === "models") {
+  console.log(JSON.stringify([
+    { group: "Gemini", value: "gemini-4-hydrogen", default: true },
+    { group: "Image", value: "gemini-nano-banana-2.1", default: false },
+  ]));
+} else if (args[0] === "generate" && args.includes("--schema")) {
+  console.log(JSON.stringify({
+    $defs: {
+      ThinkingLevel: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+    },
+  }));
+} else {
+  process.exit(2);
+}
 `);
     const discovered = await discoverCliModels("gemini", {
       command,
@@ -333,26 +329,54 @@ rl.on("line", (line) => {
       timeoutMs: 3_000,
     });
     expect(discovered).toEqual({
-      defaultModel: undefined,
-      models: ["auto", "gemini-3.1-pro-preview", "gemini-3.5-flash"],
+      defaultModel: "gemini-4-hydrogen",
+      models: ["gemini-4-hydrogen", "gemini-4-neon", "gemma-4-31b-it"],
       supportedEfforts: geminiEfforts,
+      modelEfforts: {
+        "gemini-4-hydrogen": geminiEfforts,
+        "gemini-4-neon": geminiEfforts,
+        "gemma-4-31b-it": [],
+      },
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 });
 
-test("leaves a managed Gemini CLI for the interactive terminal", async () => {
-  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-managed-"));
+test("falls back to gemini-api CLI catalog when live models list is unauthenticated", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-catalog-"));
   try {
-    const markerPath = join(fixture, "probe-started.txt");
-    const command = await createFakeCli(fixture, "gemini", `await Bun.write(${JSON.stringify(markerPath)}, "started");`);
-    expect(await discoverCliModels("gemini", {
+    const command = await createFakeCli(fixture, "gemini-api", `
+const args = process.argv.slice(2);
+if (args[0] === "models" && args[1] === "list") {
+  process.exit(3);
+} else if (args[0] === "models") {
+  console.log(JSON.stringify([
+    { group: "Gemma", value: "gemma-4-31b-it", default: false },
+    { group: "Gemini", value: "gemini-4-hydrogen", default: true },
+    { group: "Video", value: "gemini-omni-1.2-flash", default: false },
+  ]));
+} else if (args[0] === "generate" && args.includes("--schema")) {
+  console.log(JSON.stringify({
+    $defs: {
+      ThinkingLevel: { enum: ["low", "medium", "high", "xhigh"] },
+    },
+  }));
+} else {
+  process.exit(2);
+}
+`);
+    const discovered = await discoverCliModels("gemini", {
       command,
       home: fixture,
-      env: { ...fixtureEnv(), GEMINI_CLI_SYSTEM_SETTINGS_PATH: join(fixture, "managed-settings.json") },
-    })).toEqual({ models: [] });
-    await expect(access(markerPath)).rejects.toThrow();
+      env: fixtureEnv(),
+      timeoutMs: 3_000,
+    });
+    expect(discovered).toEqual({
+      defaultModel: "gemini-4-hydrogen",
+      models: ["gemini-4-hydrogen", "gemma-4-31b-it"],
+      supportedEfforts: ["low", "medium", "high", "xhigh"],
+    });
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }

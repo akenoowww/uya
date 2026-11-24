@@ -105,7 +105,7 @@ bun run desktop:build
 | --- | --- | --- |
 | **Codex** | Read-only sandbox ішінде `exec --json` | Иә |
 | **Claude Code** | Құралдар мен жоба баптаулары өшірілген `stream-json` | Иә |
-| **Gemini CLI** | Құралдар өшірілген `stream-json` (жүйелік баптаулар PTY арқылы) | Иә |
+| **Gemini API (`gemini-api`)** | Нақты уақыттағы API модельдері мен ойлану деңгейлері бар Interactions API стримі (`generate --no-interactive -o json`) | Иә (`gemini-api explore`) |
 | **Qwen Code** | Құрал шақыру шегі `0` болатын `--safe-mode` ішінде `stream-json` | Иә |
 | **OpenCode** | Оқшауланған баптаулар және CLI ортасының авторизациясымен `run --format json --pure` | Иә (сақталған кіру мен басқарылатын баптаулармен бірге) |
 | **Ollama** | Орнатылған модельдер үшін жергілікті HTTP-стрим | Иә (`ollama` орнатылған болса) |

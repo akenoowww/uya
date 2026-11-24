@@ -31,6 +31,8 @@ test("returns fixed diagnostics without reflecting raw messages or custom argume
 test("recognizes useful failure classes from CLI error syntax", () => {
   const examples = [
     ["Access token expired. Use the CLI login.", "authentication"],
+    ['{"error_type":"authentication_error","status_code":403,"message":"Permission denied"}', "authentication"],
+    ['{"error_type":"rate_limit_error","status":"RESOURCE_EXHAUSTED","status_code":429}', "rate-limit"],
     ["API Error: 429 insufficient_quota", "quota"],
     ["Request failed with status code 429", "rate-limit"],
     ["403 Forbidden", "permission"],

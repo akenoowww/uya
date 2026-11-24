@@ -93,7 +93,7 @@ fn main() {
                     let bundled = (scheme == "tauri" && host == Some("localhost"))
                         || ((scheme == "http" || scheme == "https")
                             && host == Some("tauri.localhost"));
-                    let dev = !cfg!(feature = "custom-protocol")
+                    let dev = tauri::is_dev()
                         && scheme == "http"
                         && host == Some("127.0.0.1")
                         && url.port() == Some(1420);

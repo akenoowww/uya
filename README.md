@@ -68,7 +68,7 @@ Get-ChildItem Uya-*-windows-x64-setup.exe | Get-FileHash -Algorithm SHA256
 
 ### In-app updates
 
-Uya checks for updates in the background and shows **Restart to Update** after it downloads and verifies a new version. Run **Check for Updates** from the command palette to check manually. If you installed `0.1.0`, download and install the first release with update support from GitHub Releases once.
+Signed desktop builds from GitHub Releases check for updates in the background. Select **Restart to Update** when the downloaded update is ready, or run **Check for Updates** from the command palette.
 
 ## Build from Source
 

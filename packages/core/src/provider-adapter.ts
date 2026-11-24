@@ -22,7 +22,7 @@ export interface AdapterRequest {
 
 export interface ProviderAdapter {
   readonly id: string;
-  discover(): Promise<Provider> | Provider;
+  discover(refresh?: boolean): Promise<Provider> | Provider;
   run?(request: AdapterRequest): Promise<Usage>;
 }
 

@@ -3,7 +3,9 @@ import { runCli, type CliPrepare } from "./agents";
 import {
   geminiBlocked, openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli, prepareGemini, prepareOpenCode, prepareQwen,
 } from "./cli-adapters";
-import { discoverCliModels } from "./cli-models";
+import {
+  discoverCliModels, type CliModelDiscoverer, type CliModelDiscovery,
+} from "./cli-models";
 import { supportsCustomStructured } from "./custom-cli";
 import { discoverLocalRuntimeModels, runLocalRuntime, type LocalRuntimeId } from "./local-runtimes";
 import { discoverOllamaModels, runOllama } from "./ollama";
@@ -22,13 +24,51 @@ interface CliDefinition {
   detail?: string;
 }
 
-function cliAdapter({ id, name, command: configured, prepare, blocked, detail }: CliDefinition): ProviderAdapter {
+const CLI_MODELS_CACHE_TTL_MS = 5 * 60_000;
+const CLI_MODELS_EMPTY_TTL_MS = 30_000;
+
+interface CachedCliModels {
+  command: string;
+  discovery: CliModelDiscovery;
+  until: number;
+}
+
+function cliAdapter(
+  { id, name, command: configured, prepare, blocked, detail }: CliDefinition,
+  discoverModels: CliModelDiscoverer,
+): ProviderAdapter {
+  let cached: CachedCliModels | undefined;
+  let pending: { command: string; refresh: boolean; promise: Promise<CliModelDiscovery> } | undefined;
+
+  async function resolveModels(command: string, refresh: boolean): Promise<CliModelDiscovery> {
+    if (!refresh && cached && cached.command === command && cached.until > Date.now()) {
+      return cached.discovery;
+    }
+    if (pending && pending.command === command && (pending.refresh || !refresh)) {
+      return pending.promise;
+    }
+    const promise = discoverModels(id, { command, refresh })
+      .catch((): CliModelDiscovery => ({ models: [] }))
+      .then((discovery) => {
+        const ttl = discovery.models.length > 0 ? CLI_MODELS_CACHE_TTL_MS : CLI_MODELS_EMPTY_TTL_MS;
+        if (pending?.promise === promise) {
+          cached = { command, discovery, until: Date.now() + ttl };
+        }
+        return discovery;
+      })
+      .finally(() => {
+        if (pending?.promise === promise) pending = undefined;
+      });
+    pending = { command, refresh, promise };
+    return promise;
+  }
+
   return {
     id,
-    discover() {
+    async discover(refresh = false) {
       const command = executable(configured);
       const unavailable = command ? blocked?.() : "Executable missing from PATH";
-      const discovered = command ? discoverCliModels(id) : undefined;
+      const discovered = command && !unavailable ? await resolveModels(command, refresh) : undefined;
       return {
         id, name, kind: "cli", command,
         available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && prepare && !unavailable),
@@ -116,6 +156,7 @@ export class ProviderRegistry {
   constructor(
     discoverOllama = discoverOllamaModels,
     discoverLocal: (id: LocalRuntimeId) => Promise<string[]> = discoverLocalRuntimeModels,
+    discoverCli: CliModelDiscoverer = discoverCliModels,
   ) {
     const local = (id: LocalRuntimeId, name: string, command: string) => runtimeAdapter({
       id, name, executable: command,
@@ -123,16 +164,18 @@ export class ProviderRegistry {
       generate: (model, request) => runLocalRuntime(id, model, request.messages ?? request.prompt, request.signal, request.output),
     });
 
+    const cli = (definition: CliDefinition) => cliAdapter(definition, discoverCli);
+
     const adapters = [
-      cliAdapter({ id: "codex", name: "Codex", command: "codex", prepare: prepareCodex }),
-      cliAdapter({ id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude }),
-      cliAdapter({ id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGemini, blocked: geminiBlocked }),
-      cliAdapter({ id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen }),
-      cliAdapter({
+      cli({ id: "codex", name: "Codex", command: "codex", prepare: prepareCodex }),
+      cli({ id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude }),
+      cli({ id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGemini, blocked: geminiBlocked }),
+      cli({ id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen }),
+      cli({
         id: "opencode", name: "OpenCode", command: "opencode", prepare: prepareOpenCode, blocked: openCodeBlocked,
         detail: "Structured uses authentication from the CLI environment. Saved profiles are available in Terminal.",
       }),
-      cliAdapter({ id: "kimi", name: "Kimi Code", command: "kimi" }),
+      cli({ id: "kimi", name: "Kimi Code", command: "kimi" }),
       local("llamacpp", "llama.cpp", "llama-cli"),
       local("mlx", "MLX LM", "mlx_lm.generate"),
       local("lmstudio", "LM Studio", "lms"),
@@ -149,8 +192,8 @@ export class ProviderRegistry {
     this.adapters = new Map(adapters.map((adapter) => [adapter.id, adapter]));
   }
 
-  discover(): Promise<Provider[]> {
-    return Promise.all(Array.from(this.adapters.values(), (adapter) => adapter.discover()));
+  discover(refresh = false): Promise<Provider[]> {
+    return Promise.all(Array.from(this.adapters.values(), (adapter) => adapter.discover(refresh)));
   }
 
   async run(request: AdapterRequest): Promise<Usage> {

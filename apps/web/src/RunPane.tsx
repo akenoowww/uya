@@ -49,7 +49,7 @@ function groupEvents(events: RunEvent[]) {
 function terminalArgsFor(provider: Provider | undefined, model: string | undefined): string[] | undefined {
   if (!provider) return undefined;
   if (provider.id === "ollama" && model) return ["run", model];
-  if (provider.kind === "cli" && model && ["codex", "claude", "gemini", "qwen", "opencode"].includes(provider.id)) {
+  if (provider.kind === "cli" && model && ["codex", "claude", "gemini", "qwen", "opencode", "kimi"].includes(provider.id)) {
     return [...(provider.terminalArgs ?? []), "--model", model];
   }
   return provider.terminalArgs;
@@ -188,12 +188,13 @@ interface Props {
   onCancel: (id: string) => void;
   onNewConversation: () => void;
   onOpenProviders: () => void;
+  onRefreshProviders?: () => Promise<void> | void;
 }
 
 export function RunPane({
   id, provider, providers, config, details, draft, promptHistory, busy, connected, choosingProject,
   contextCount, hasSelection, bridge, cwd, onDraftChange, onSend, onConfig, onCancel,
-  onNewConversation, onOpenProviders,
+  onNewConversation, onOpenProviders, onRefreshProviders,
 }: Props) {
   const transcript = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -250,6 +251,7 @@ export function RunPane({
           provider={provider}
           configuredModel={config.model}
           onChange={(nextModel) => onConfig({ model: nextModel })}
+          onRefresh={connected ? onRefreshProviders : undefined}
         />
         <span className="toolbar-spacer" />
         {mode === "structured" && details.length > 0 && !isRunning && (

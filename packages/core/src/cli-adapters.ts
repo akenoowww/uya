@@ -2,6 +2,7 @@ import { lstatSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { CliResponseError, type CliPrepare } from "./agents";
+import { claudeIsolationArgs } from "./claude";
 import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { customCliCommand, supportsCustomStructured } from "./custom-cli";
@@ -17,14 +18,6 @@ const codexArgs = [
   "-c", 'web_search="disabled"',
   "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
   "--ephemeral", "--ignore-user-config", "--ignore-rules", "-",
-];
-
-const claudeArgs = [
-  "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-  "--setting-sources", "user", "--disable-slash-commands",
-  "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-  "--disallowedTools", "mcp__*", "--settings", '{"disableAllHooks":true}',
-  "--no-session-persistence", "--no-chrome",
 ];
 
 const qwenArgs = [
@@ -257,11 +250,17 @@ export const prepareCodex: CliPrepare = (request, _cwd, usage) => ({
   parse: codexParser(request.output, usage),
 });
 
-export const prepareClaude: CliPrepare = (request, _cwd, usage) => ({
-  args: [...modelArgs(request), ...claudeArgs],
-  env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
-  parse: messageStreamParser(request.provider.name, request.output, usage, claudeArgs),
-});
+export const prepareClaude: CliPrepare = async (request, cwd, usage) => {
+  const args = [
+    ...modelArgs(request), "-p", "--output-format", "stream-json", "--verbose",
+    "--include-partial-messages", ...await claudeIsolationArgs(cwd),
+  ];
+  return {
+    args,
+    env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+    parse: messageStreamParser(request.provider.name, request.output, usage, args),
+  };
+};
 
 export const prepareQwen: CliPrepare = (request, _cwd, usage) => ({
   args: [...modelArgs(request), ...qwenArgs],

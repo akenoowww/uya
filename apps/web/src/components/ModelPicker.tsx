@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { Button, Combobox, Group, ScrollArea, Text, useCombobox } from "@mantine/core";
-import { CaretDown, Check, MagnifyingGlass, Plus, Sparkle } from "@phosphor-icons/react";
+import { ActionIcon, Button, Combobox, Group, ScrollArea, Text, useCombobox } from "@mantine/core";
+import { ArrowClockwise, CaretDown, Check, MagnifyingGlass, Plus, Sparkle } from "@phosphor-icons/react";
 import type { Provider } from "@ide/protocol";
 import { resolveModel, shortModelName } from "../workbenchStore";
 
@@ -12,10 +12,12 @@ interface Props {
   provider: Provider | undefined;
   configuredModel: string | undefined;
   onChange: (model: string | undefined) => void;
+  onRefresh?: () => Promise<void> | void;
 }
 
-export function ModelPicker({ paneId, provider, configuredModel, onChange }: Props) {
+export function ModelPicker({ paneId, provider, configuredModel, onChange, onRefresh }: Props) {
   const [query, setQuery] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const combobox = useCombobox({
     onDropdownClose: () => {
       combobox.resetSelectedOption();
@@ -87,6 +89,27 @@ export function ModelPicker({ paneId, provider, configuredModel, onChange }: Pro
           onChange={(event) => setQuery(event.currentTarget.value)}
           placeholder={isCli ? "Filter or type model ID…" : "Filter local models…"}
           leftSection={<MagnifyingGlass size={13} />}
+          rightSection={onRefresh ? (
+            <ActionIcon
+              size="xs"
+              variant="subtle"
+              color="gray"
+              aria-label="Refresh models"
+              title={isCli ? "Refresh models from CLI" : "Refresh local models"}
+              loading={refreshing}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                if (refreshing) return;
+                setRefreshing(true);
+                void Promise.resolve(onRefresh())
+                  .catch(() => undefined)
+                  .finally(() => setRefreshing(false));
+              }}
+            >
+              <ArrowClockwise size={12} />
+            </ActionIcon>
+          ) : undefined}
+          rightSectionPointerEvents={onRefresh ? "all" : "none"}
           spellCheck={false}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229) {
@@ -136,7 +159,11 @@ export function ModelPicker({ paneId, provider, configuredModel, onChange }: Pro
             )}
 
             {!filtered.length && !validCustom && (
-              <Combobox.Empty>No matching models</Combobox.Empty>
+              <Combobox.Empty>
+                {isCli && !models.length && !trimmedQuery
+                  ? "No models reported by CLI — type a model ID or refresh"
+                  : "No matching models"}
+              </Combobox.Empty>
             )}
           </ScrollArea.Autosize>
         </Combobox.Options>

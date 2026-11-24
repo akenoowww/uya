@@ -28,7 +28,7 @@ export type CliPrepare = (
   usage: Usage,
 ) => CliInvocation | Promise<CliInvocation>;
 
-function cliEnv(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+export function cliEnv(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
   delete env.IDE_SESSION_TOKEN;
   delete env.IDE_DATA_DIR;
@@ -66,10 +66,10 @@ function quoteCmdArg(value: string): string {
   if (/[&|<>^%!"\r\n]/.test(value)) {
     throw new AdapterError("The CLI argument contains characters unsupported by Windows command shims.");
   }
-  return /\s/.test(value) ? `"${value}"` : value;
+  return !value || /\s/.test(value) ? `"${value}"` : value;
 }
 
-function spawnTarget(executable: string, args: string[]): { command: string; args: string[]; shell: boolean } {
+export function spawnTarget(executable: string, args: string[]): { command: string; args: string[]; shell: boolean } {
   if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)) {
     return {
       command: quoteCmdArg(executable),

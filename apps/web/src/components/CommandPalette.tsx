@@ -3,14 +3,15 @@ import { Badge, Group, Kbd } from "@mantine/core";
 import { Spotlight, spotlight } from "@mantine/spotlight";
 import type { SpotlightActionData, SpotlightActionGroupData } from "@mantine/spotlight";
 import {
-  ArrowClockwise, BookOpen, Broadcast, ClockCounterClockwise, Columns, ColumnsPlusRight, FolderOpen,
-  Keyboard, MagnifyingGlass, NotePencil, PlugsConnected, SlidersHorizontal,
-  Sparkle, TerminalWindow,
+  ArrowClockwise, BookOpen, Brain, Broadcast, ChartBar, ClockCounterClockwise, Columns, ColumnsPlusRight,
+  FileMagnifyingGlass, FolderOpen, GitBranch, Keyboard, MagnifyingGlass, NotePencil, PlugsConnected,
+  Scales, SlidersHorizontal, Sparkle, TerminalWindow,
 } from "@phosphor-icons/react";
 import { useShallow } from "zustand/react/shallow";
 import { focusPaneInput, formatShortcut, isMac } from "../shortcuts";
 import { useWorkbench, useWorkbenchState } from "../workbenchContext";
 import { activeChatPane, paneDisplayTitle, providerForPane, resolveModel } from "../workbenchStore";
+import { EFFORT_META, resolveSupportedEfforts } from "./EffortPicker";
 import { ProviderIcon } from "./ProviderIcon";
 
 export function toggleCommandPalette() {
@@ -21,7 +22,13 @@ export function openCommandPalette() {
   spotlight.open();
 }
 
-export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () => Promise<void> }) {
+export function CommandPalette({
+  onOpenQuickOpen,
+  onCheckForUpdates,
+}: {
+  onOpenQuickOpen?: () => void;
+  onCheckForUpdates?: () => Promise<void>;
+}) {
   const workbench = useWorkbench();
   const { dock, providers, chatPanes, activePane, activeProvider } = useWorkbenchState(useShallow((state) => {
     const active = activeChatPane(state.dock);
@@ -48,7 +55,7 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
           label: title,
           description: `Focus split ${index + 1}`,
           keywords: ["split", `${index + 1}`, title, provider?.id ?? ""],
-          leftSection: <ProviderIcon providerId={provider?.id} size={13} />,
+          leftSection: <ProviderIcon providerId={provider?.id} size={14} framed={false} />,
           rightSection: (
             <Group gap={6}>
               {dock.activePaneId === pane.id && <Badge size="xs" variant="light" color="iris">Active</Badge>}
@@ -93,6 +100,34 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
       groups.push({ group: `Switch ${activeProvider.name} Model`, actions: modelActions });
     }
 
+    const supportedEfforts = resolveSupportedEfforts(activeProvider, currentModel);
+    if (activePane && activeProvider && supportedEfforts.length > 0) {
+      const currentEffort = activePane.config.effort;
+      groups.push({
+        group: `Set ${activeProvider.name} Reasoning Effort`,
+        actions: [
+          {
+            id: "effort-auto",
+            label: "Effort: Auto",
+            description: "Use provider default reasoning effort",
+            keywords: ["effort", "reasoning", "thinking", "auto", "default"],
+            leftSection: <Brain size={15} weight="duotone" color="var(--accent)" />,
+            rightSection: !currentEffort ? <Badge size="xs" variant="light" color="iris">Current</Badge> : undefined,
+            onClick: () => workbench.dock.configure(activePane.id, { effort: undefined }),
+          },
+          ...supportedEfforts.map((level) => ({
+            id: `effort-${level}`,
+            label: `Effort: ${EFFORT_META[level].label}`,
+            description: EFFORT_META[level].hint,
+            keywords: ["effort", "reasoning", "thinking", level, EFFORT_META[level].label],
+            leftSection: <Brain size={15} weight="duotone" color="var(--accent)" />,
+            rightSection: currentEffort === level ? <Badge size="xs" variant="light" color="iris">Current</Badge> : undefined,
+            onClick: () => workbench.dock.configure(activePane.id, { effort: level }),
+          })),
+        ],
+      });
+    }
+
     const availableProviders = providers.filter((entry) => entry.available);
     if (activePane && availableProviders.length > 1) {
       groups.push({
@@ -102,10 +137,11 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
           label: `Use ${provider.name}`,
           description: provider.structured ? "Structured chat & terminal" : "Interactive terminal",
           keywords: ["provider", provider.name, provider.id],
-          leftSection: <ProviderIcon providerId={provider.id} size={13} />,
+          leftSection: <ProviderIcon providerId={provider.id} size={14} framed={false} />,
           onClick: () => workbench.dock.configure(activePane.id, {
             providerId: provider.id,
             model: undefined,
+            effort: undefined,
             mode: provider.structured ? "structured" : "terminal",
           }),
         })),
@@ -113,6 +149,14 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
     }
 
     const actionItems: SpotlightActionData[] = [
+      ...(onOpenQuickOpen ? [{
+        id: "quick-open",
+        label: "Quick Open file",
+        description: "Jump to any file in the open workspace",
+        leftSection: <FileMagnifyingGlass size={15} weight="duotone" />,
+        rightSection: <Kbd>{formatShortcut("quick-open")}</Kbd>,
+        onClick: onOpenQuickOpen,
+      }] : []),
       {
         id: "new-split",
         label: "New model split",
@@ -143,6 +187,13 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
         rightSection: <Kbd>{formatShortcut("toggle-broadcast")}</Kbd>,
         onClick: () => workbench.toggleBroadcast(),
       },
+      {
+        id: "judge-broadcast",
+        label: "Cross-review / Synthesize broadcast responses",
+        description: "Send latest broadcast responses to an arbiter model",
+        leftSection: <Scales size={15} weight="duotone" />,
+        onClick: () => workbench.judgeDialog.current?.(),
+      },
       ...(activePane ? [{
         id: "toggle-terminal",
         label: "Toggle split interactive terminal",
@@ -170,9 +221,17 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
         onClick: () => workbench.toggleSidebar("explorer"),
       },
       {
+        id: "toggle-git",
+        label: "Toggle Git sidebar",
+        description: "Inspect repository status, diffs, and attach git diff",
+        leftSection: <GitBranch size={15} weight="duotone" />,
+        rightSection: <Kbd>{formatShortcut("toggle-git")}</Kbd>,
+        onClick: () => workbench.toggleSidebar("git"),
+      },
+      {
         id: "toggle-history",
-        label: "Toggle Run History",
-        description: "Browse saved runs",
+        label: "Toggle History & Threads",
+        description: "Browse, resume, or fork saved conversations",
         leftSection: <ClockCounterClockwise size={15} weight="duotone" />,
         rightSection: <Kbd>{formatShortcut("toggle-history")}</Kbd>,
         onClick: () => workbench.toggleSidebar("history"),
@@ -210,6 +269,13 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
         onClick: () => workbench.openRules(),
       },
       {
+        id: "open-usage",
+        label: "View Usage & Speed Insights",
+        description: "Inspect TTFT, tokens, and effort breakdown by provider",
+        leftSection: <ChartBar size={15} weight="duotone" />,
+        onClick: () => workbench.openUsage(),
+      },
+      {
         id: "open-shortcuts",
         label: "Keyboard Shortcuts Reference",
         description: "View all hotkeys and inline slash commands",
@@ -227,7 +293,7 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
     ];
     groups.push({ group: "Actions", actions: actionItems });
     return groups;
-  }, [activePane, activeProvider, chatPanes, dock.activePaneId, onCheckForUpdates, providers, workbench]);
+  }, [activePane, activeProvider, chatPanes, dock.activePaneId, onCheckForUpdates, onOpenQuickOpen, providers, workbench]);
 
   return (
     <Spotlight
@@ -239,7 +305,7 @@ export function CommandPalette({ onCheckForUpdates }: { onCheckForUpdates?: () =
       maxHeight={380}
       searchProps={{
         leftSection: <MagnifyingGlass size={15} />,
-        placeholder: "Type a command, switch split, or pick a model…",
+        placeholder: "Type a command, switch split, pick a model or effort…",
       }}
     />
   );

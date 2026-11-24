@@ -15,6 +15,7 @@ export interface ShortcutEntry {
 
 export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: "palette", label: "Command palette", category: "Navigation", mac: ["⌘", "K"], other: ["Ctrl", "K"] },
+  { id: "quick-open", label: "Quick open file", category: "Navigation", mac: ["⌘", "P"], other: ["Ctrl", "P"] },
   { id: "shortcuts", label: "Keyboard shortcuts", category: "Navigation", mac: ["⌘", "/"], other: ["Ctrl", "/"] },
   { id: "focus-input", label: "Focus active split input", category: "Navigation", mac: ["⌘", "L"], other: ["Ctrl", "L"] },
   { id: "focus-split", label: "Focus split 1–9", category: "Navigation", mac: ["⌘", "1–9"], other: ["Ctrl", "1–9"] },
@@ -28,6 +29,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: "recall-prompt", label: "Recall previous prompt (empty input)", category: "Splits & Chat", mac: ["↑"], other: ["↑"] },
   { id: "open-project", label: "Open project folder", category: "Workspace", mac: ["⌘", "O"], other: ["Ctrl", "O"] },
   { id: "toggle-explorer", label: "Toggle Explorer sidebar", category: "Workspace", mac: ["⌘", "B"], other: ["Ctrl", "B"] },
+  { id: "toggle-git", label: "Toggle Git sidebar", category: "Workspace", mac: ["⌘", "⇧", "G"], other: ["Ctrl", "Shift", "G"] },
   { id: "toggle-history", label: "Toggle Run History", category: "Workspace", mac: ["⌘", "⇧", "H"], other: ["Ctrl", "Shift", "H"] },
   { id: "open-prompts", label: "Open Prompt Library", category: "Workspace", mac: ["⌘", "⇧", "L"], other: ["Ctrl", "Shift", "L"] },
   { id: "open-terminal", label: "Open Shell Terminal", category: "Workspace", mac: ["⌘", "J"], other: ["Ctrl", "J"] },
@@ -74,6 +76,7 @@ export function useWorkbenchShortcuts(
   workbench: Workbench,
   controls: {
     togglePalette: () => void;
+    openQuickOpen: () => void;
     openShortcuts: () => void;
   },
 ) {
@@ -91,6 +94,11 @@ export function useWorkbenchShortcuts(
       }
       if (hasOpenModal()) return;
 
+      if (key === "p" && !event.shiftKey) {
+        event.preventDefault();
+        controls.openQuickOpen();
+        return;
+      }
       if (key === "/") {
         event.preventDefault();
         controls.openShortcuts();
@@ -116,6 +124,11 @@ export function useWorkbenchShortcuts(
         workbench.toggleBroadcast();
         return;
       }
+      if (key === "g" && event.shiftKey) {
+        event.preventDefault();
+        workbench.toggleSidebar("git");
+        return;
+      }
       if (key === "h" && event.shiftKey) {
         event.preventDefault();
         workbench.toggleSidebar("history");
@@ -131,7 +144,7 @@ export function useWorkbenchShortcuts(
         workbench.openRules();
         return;
       }
-      if ((key === "\\" || key === "d") && !event.shiftKey) {
+      if (key === "\\" && !event.shiftKey) {
         event.preventDefault();
         const created = workbench.dock.newSplit();
         if (created) requestAnimationFrame(() => focusPaneInput(created));

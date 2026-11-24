@@ -27,6 +27,45 @@ export function createCoreSession(store: WorkbenchStore) {
   }
 
   const streams = createRunStreams(recordDetail, reportError);
+  let activeHistoryFilter: { query?: string; workspacePath?: string | null } = {};
+
+  async function refreshHistory(options?: { query?: string; workspacePath?: string | null }) {
+    const { bridge } = store.getState();
+    if (!bridge) return;
+    const effective = options ?? activeHistoryFilter;
+    const [runsResult, convsResult] = await Promise.allSettled([
+      bridge.rpc("runs.list", { limit: 100, ...effective }),
+      bridge.rpc("runs.conversations", { limit: 60, ...effective }),
+    ]);
+    if (store.getState().bridge !== bridge) return;
+    store.setState((state) => ({
+      history: runsResult.status === "fulfilled" ? runsResult.value : state.history,
+      conversations: convsResult.status === "fulfilled" ? convsResult.value : state.conversations,
+    }));
+  }
+
+  function setHistoryFilter(filter: { query?: string; workspacePath?: string | null }) {
+    activeHistoryFilter = filter;
+    return refreshHistory(filter);
+  }
+
+  async function refreshWorkspaceMetadata(root: string | null) {
+    const { bridge } = store.getState();
+    if (!bridge || !root) {
+      store.setState({ gitBranch: null, gitChangeCount: 0, projectRules: [] });
+      return;
+    }
+    const [gitRes, rulesRes] = await Promise.allSettled([
+      bridge.rpc("git.status", { workspacePath: root }),
+      bridge.rpc("workspace.projectRules", { workspacePath: root }),
+    ]);
+    if (store.getState().workspace?.path !== root) return;
+    store.setState({
+      gitBranch: gitRes.status === "fulfilled" && gitRes.value.isRepo ? (gitRes.value.branch ?? "HEAD") : null,
+      gitChangeCount: gitRes.status === "fulfilled" && gitRes.value.isRepo ? gitRes.value.changes.length : 0,
+      projectRules: rulesRes.status === "fulfilled" ? rulesRes.value : [],
+    });
+  }
 
   function start() {
     let current = true;
@@ -34,9 +73,13 @@ export function createCoreSession(store: WorkbenchStore) {
     let watcherDebounce: ReturnType<typeof setTimeout> | undefined;
     store.setState({ bridge: null, connectionError: "" });
     void connect().then(async (bridge) => {
-      const history = await bridge.rpc("runs.list", { limit: 100 });
+      const [history, conversations, recentWorkspaces] = await Promise.all([
+        bridge.rpc("runs.list", { limit: 100 }),
+        bridge.rpc("runs.conversations", { limit: 60 }).catch(() => []),
+        bridge.listRecentFolders(),
+      ]);
       if (!current) return;
-      store.setState({ bridge, history });
+      store.setState({ bridge, history, conversations, recentWorkspaces });
 
       void bridge.watchFolder((path) => {
         if (!current || path !== store.getState().workspace?.path) return;
@@ -44,6 +87,7 @@ export function createCoreSession(store: WorkbenchStore) {
         watcherDebounce = setTimeout(() => {
           if (path === store.getState().workspace?.path) {
             store.setState((state) => ({ refreshKey: state.refreshKey + 1 }));
+            void refreshWorkspaceMetadata(path);
           }
         }, 180);
       }).then((dispose) => {
@@ -103,8 +147,12 @@ export function createCoreSession(store: WorkbenchStore) {
     recordDetail({ run, events: [] });
     const key = conversationKey(root, conversationId);
     store.setState((state) => ({ paneRuns: { ...state.paneRuns, [key]: [...(state.paneRuns[key] ?? []), run.id].slice(-12) } }));
-    if (run.status === "running") streams.follow(bridge, run);
-    else void bridge.rpc("runs.get", { id: run.id }).then(recordDetail).catch(() => {});
+    if (run.status === "running") {
+      streams.follow(bridge, run);
+    } else {
+      void bridge.rpc("runs.get", { id: run.id }).then(recordDetail).catch(() => {});
+    }
+    void refreshHistory();
   }
 
   async function readRun(id: string) {
@@ -124,5 +172,47 @@ export function createCoreSession(store: WorkbenchStore) {
     }
   }
 
-  return { start, refreshProviders, hydrate, addRun, readRun, cancelRun, reportError };
+  async function deleteRun(id: string) {
+    const { bridge } = store.getState();
+    if (!bridge) return;
+    try {
+      await bridge.rpc("runs.delete", { id });
+      store.setState((state) => {
+        const nextDetails = { ...state.details };
+        delete nextDetails[id];
+        return {
+          details: nextDetails,
+          history: state.history.filter((run) => run.id !== id),
+        };
+      });
+      await refreshHistory();
+    } catch (reason) {
+      reportError(errorMessage(reason));
+    }
+  }
+
+  async function deleteConversation(id: string, workspacePath: string | null) {
+    const { bridge } = store.getState();
+    if (!bridge) return;
+    try {
+      await bridge.rpc("runs.deleteConversation", { id, workspacePath });
+      const key = conversationKey(workspacePath, id);
+      store.setState((state) => {
+        const nextPaneRuns = { ...state.paneRuns };
+        delete nextPaneRuns[key];
+        return {
+          paneRuns: nextPaneRuns,
+          conversations: state.conversations.filter((conv) => !(conv.id === id && conv.workspacePath === workspacePath)),
+        };
+      });
+      await refreshHistory();
+    } catch (reason) {
+      reportError(errorMessage(reason));
+    }
+  }
+
+  return {
+    start, refreshProviders, refreshHistory, setHistoryFilter, refreshWorkspaceMetadata,
+    hydrate, addRun, readRun, cancelRun, deleteRun, deleteConversation, reportError, recordDetail,
+  };
 }

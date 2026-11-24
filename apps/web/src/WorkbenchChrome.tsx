@@ -1,103 +1,180 @@
-import { useEffect, useState } from "react";
-import { ActionIcon, Badge, Button, Group, Kbd, Modal, Text, TextInput } from "@mantine/core";
+import { useEffect, useRef, useState } from "react";
 import {
-  BookOpen, CaretDown, ClockCounterClockwise, ColumnsPlusRight, Files, FolderOpen,
-  Keyboard, MagnifyingGlass, PlugsConnected, SidebarSimple, SlidersHorizontal, TerminalWindow,
+  ActionIcon, Badge, Box, Button, Group, Indicator, Kbd, Loader, Menu, Modal, Stack, Text, UnstyledButton,
+} from "@mantine/core";
+import {
+  BookOpen, CaretDown, ChartBar, ClockCounterClockwise, ColumnsPlusRight, Files,
+  FolderOpen, GitBranch, Keyboard, MagnifyingGlass, PlugsConnected, TerminalWindow,
 } from "@phosphor-icons/react";
+import { isTauri } from "@tauri-apps/api/core";
 import { useShallow } from "zustand/react/shallow";
-import { ProviderIcon, UyaBrandMark } from "./components/ProviderIcon";
+import { JudgeModal } from "./components/JudgeModal";
+import { UyaBrandMark } from "./components/ProviderIcon";
 import { HintTooltip } from "./components/Tooltip";
+import { GitPanel } from "./GitPanel";
+import { HistoryPanel } from "./HistoryPanel";
 import { ProjectExplorer } from "./ProjectExplorer";
-import { RunStatus } from "./RunPane";
 import { SettingsDialog } from "./SettingsDialog";
-import { formatShortcut } from "./shortcuts";
+import { formatShortcut, isMac } from "./shortcuts";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
-import { shortModelName, unavailable } from "./workbenchStore";
+import { unavailable, workspaceLabel } from "./workbenchStore";
+
+const SIDEBAR_WIDTH_KEY = "uya:sidebar-width:v1";
+
+function loadSidebarWidth(): number {
+  try {
+    const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(raw) && raw >= 170 && raw <= 460) return raw;
+  } catch {
+    // Ignore storage failures.
+  }
+  return 236;
+}
 
 export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
   onOpenPalette: () => void;
   onRestartToUpdate?: () => void;
 }) {
-  const { pickProject, openProviders } = useWorkbench();
-  const { project, blocked, providerCount } = useWorkbenchState(useShallow((state) => ({
-    project: state.workspace?.name ?? "Open project",
+  const { dock, pickProject, openProviders } = useWorkbench();
+  const { workspace, recentWorkspaces, blocked, providerCount } = useWorkbenchState(useShallow((state) => ({
+    workspace: state.workspace,
+    recentWorkspaces: state.recentWorkspaces,
     blocked: !state.bridge || state.choosingProject || state.submitting,
     providerCount: state.providers.filter((provider) => provider.available).length,
   })));
+
+  const otherRecents = recentWorkspaces.filter((path) => path !== workspace?.path);
+
   return (
-    <header className="titlebar">
-      <div className="product-name">
-        <span className="brand-mark"><UyaBrandMark size={28} /></span>
-        <h1>Uya</h1>
-      </div>
-      <div className="project-switch">
-        <HintTooltip label="Open project folder" shortcut={formatShortcut("open-project")}>
-          <Button
-            variant="default"
-            size="xs"
-            className="project-button"
-            leftSection={<FolderOpen size={15} weight="duotone" />}
-            rightSection={<CaretDown size={11} weight="bold" />}
-            onClick={() => void pickProject()}
-            disabled={blocked}
-          >
-            <span className="project-button-text">{project}</span>
-          </Button>
-        </HintTooltip>
+    <Box component="header" className={`titlebar${isMac && isTauri() ? " titlebar-mac-overlay" : ""}`} data-tauri-drag-region>
+      <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+        <span className="brand-mark" data-tauri-drag-region><UyaBrandMark size={20} /></span>
+        <Menu position="bottom-start" width={290}>
+          <Menu.Target>
+            <Button
+              variant="subtle"
+              color="gray"
+              size="compact-xs"
+              className="project-button"
+              leftSection={<FolderOpen size={14} weight="duotone" />}
+              rightSection={<CaretDown size={10} weight="bold" />}
+              disabled={blocked}
+            >
+              <span className="project-button-text">{workspace?.name ?? "Open project"}</span>
+            </Button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item
+              leftSection={<FolderOpen size={13} weight="duotone" />}
+              rightSection={<Kbd>{formatShortcut("open-project")}</Kbd>}
+              onClick={() => void pickProject()}
+            >
+              Open folder…
+            </Menu.Item>
+            {otherRecents.length > 0 && (
+              <>
+                <Menu.Divider />
+                <Menu.Label>Recent projects</Menu.Label>
+                {otherRecents.map((path) => (
+                  <Menu.Item
+                    key={path}
+                    leftSection={<FolderOpen size={12} />}
+                    onClick={() => void pickProject(false, path)}
+                    title={path}
+                  >
+                    <Text size="xs" truncate="end">{workspaceLabel(path)}</Text>
+                  </Menu.Item>
+                ))}
+              </>
+            )}
+          </Menu.Dropdown>
+        </Menu>
+      </Group>
+
+      <Group justify="center" wrap="nowrap" data-tauri-drag-region>
         <HintTooltip label="Command palette" shortcut={formatShortcut("palette")}>
           <Button
             variant="default"
-            size="xs"
+            size="compact-xs"
             className="palette-trigger"
-            leftSection={<MagnifyingGlass size={13} />}
+            leftSection={<MagnifyingGlass size={12} />}
             rightSection={<Kbd>{formatShortcut("palette")}</Kbd>}
             onClick={onOpenPalette}
           >
             <span className="palette-trigger-text">Commands</span>
           </Button>
         </HintTooltip>
-      </div>
-      <div className="titlebar-right">
+      </Group>
+
+      <Group justify="flex-end" gap={6} wrap="nowrap">
         {onRestartToUpdate && (
-          <Button color="iris" size="xs" onClick={onRestartToUpdate}>Restart to Update</Button>
+          <Button color="iris" size="compact-xs" onClick={onRestartToUpdate}>Restart to Update</Button>
         )}
-        <HintTooltip label="Manage providers & models" shortcut={formatShortcut("open-providers")}>
+        <HintTooltip label="New model split" shortcut={formatShortcut("new-split")}>
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            size="sm"
+            aria-label="New model split"
+            onClick={() => dock.newSplit()}
+          >
+            <ColumnsPlusRight size={15} weight="duotone" />
+          </ActionIcon>
+        </HintTooltip>
+        <HintTooltip label="Providers, rules & usage" shortcut={formatShortcut("open-providers")}>
           <Button
             variant="default"
-            size="xs"
-            leftSection={<PlugsConnected size={15} weight="duotone" />}
+            size="compact-xs"
+            leftSection={<PlugsConnected size={13} weight="duotone" />}
             rightSection={providerCount > 0 ? <Badge size="xs" variant="light" color="iris" px={5}>{providerCount}</Badge> : undefined}
             onClick={openProviders}
           >
             Providers
           </Button>
         </HintTooltip>
-      </div>
-    </header>
+      </Group>
+    </Box>
   );
 }
 
 export function ActivityRail() {
-  const { dock, toggleSidebar, openShortcuts } = useWorkbench();
-  const { sidebar, contextCount } = useWorkbenchState(useShallow((state) => ({
+  const { dock, toggleSidebar, openShortcuts, openUsage } = useWorkbench();
+  const { sidebar, contextCount, gitChangeCount } = useWorkbenchState(useShallow((state) => ({
     sidebar: state.sidebar,
-    contextCount: state.contextPaths.length,
+    contextCount: state.contextPaths.length + state.attachments.length,
+    gitChangeCount: state.gitChangeCount,
   })));
   return (
-    <nav className="activity-rail" aria-label="Workspace tools">
+    <Stack component="nav" className="activity-rail" align="center" gap={4} aria-label="Workspace tools">
       <HintTooltip label="Explorer" shortcut={formatShortcut("toggle-explorer")} side="right">
-        <ActionIcon
-          size="lg"
-          variant={sidebar === "explorer" ? "light" : "subtle"}
-          color={sidebar === "explorer" ? "iris" : "gray"}
-          className="rail-action"
-          aria-label="Explorer"
-          aria-pressed={sidebar === "explorer"}
-          onClick={() => toggleSidebar("explorer")}
-        >
-          <Files size={19} weight={sidebar === "explorer" ? "duotone" : "regular"} />
-          {contextCount > 0 && <span className="rail-badge">{contextCount}</span>}
-        </ActionIcon>
+        <Indicator disabled={contextCount === 0} label={contextCount} size={14} offset={3} color="iris" fw={700}>
+          <ActionIcon
+            size="lg"
+            variant={sidebar === "explorer" ? "light" : "subtle"}
+            color={sidebar === "explorer" ? "iris" : "gray"}
+            className="rail-action"
+            aria-label="Explorer"
+            aria-pressed={sidebar === "explorer"}
+            onClick={() => toggleSidebar("explorer")}
+          >
+            <Files size={18} weight={sidebar === "explorer" ? "duotone" : "regular"} />
+          </ActionIcon>
+        </Indicator>
+      </HintTooltip>
+      <HintTooltip label="Git changes" shortcut={formatShortcut("toggle-git")} side="right">
+        <Indicator disabled={gitChangeCount === 0} label={gitChangeCount > 99 ? "99" : gitChangeCount} size={14} offset={3} color="iris" fw={700}>
+          <ActionIcon
+            size="lg"
+            variant={sidebar === "git" ? "light" : "subtle"}
+            color={sidebar === "git" ? "iris" : "gray"}
+            className="rail-action"
+            aria-label="Git changes"
+            aria-pressed={sidebar === "git"}
+            onClick={() => toggleSidebar("git")}
+          >
+            <GitBranch size={18} weight={sidebar === "git" ? "duotone" : "regular"} />
+          </ActionIcon>
+        </Indicator>
       </HintTooltip>
       <HintTooltip label="Prompt Library" shortcut={formatShortcut("open-prompts")} side="right">
         <ActionIcon
@@ -108,23 +185,23 @@ export function ActivityRail() {
           aria-label="Prompt Library"
           onClick={() => dock.openTool("prompts", "Prompt Library")}
         >
-          <BookOpen size={19} weight="regular" />
+          <BookOpen size={18} weight="regular" />
         </ActionIcon>
       </HintTooltip>
-      <HintTooltip label="Run History" shortcut={formatShortcut("toggle-history")} side="right">
+      <HintTooltip label="History & Threads" shortcut={formatShortcut("toggle-history")} side="right">
         <ActionIcon
           size="lg"
           variant={sidebar === "history" ? "light" : "subtle"}
           color={sidebar === "history" ? "iris" : "gray"}
           className="rail-action"
-          aria-label="Run History"
+          aria-label="History & Threads"
           aria-pressed={sidebar === "history"}
           onClick={() => toggleSidebar("history")}
         >
-          <ClockCounterClockwise size={19} weight={sidebar === "history" ? "duotone" : "regular"} />
+          <ClockCounterClockwise size={18} weight={sidebar === "history" ? "duotone" : "regular"} />
         </ActionIcon>
       </HintTooltip>
-      <div className="rail-spacer" />
+      <Box style={{ flex: 1 }} />
       <HintTooltip label="Shell Terminal" shortcut={formatShortcut("open-terminal")} side="right">
         <ActionIcon
           size="lg"
@@ -134,7 +211,19 @@ export function ActivityRail() {
           aria-label="Terminal"
           onClick={() => dock.openTool("terminal", "Terminal")}
         >
-          <TerminalWindow size={19} weight="regular" />
+          <TerminalWindow size={18} weight="regular" />
+        </ActionIcon>
+      </HintTooltip>
+      <HintTooltip label="Usage & Speed Insights" side="right">
+        <ActionIcon
+          size="lg"
+          variant="subtle"
+          color="gray"
+          className="rail-action"
+          aria-label="Usage Insights"
+          onClick={openUsage}
+        >
+          <ChartBar size={18} weight="regular" />
         </ActionIcon>
       </HintTooltip>
       <HintTooltip label="Keyboard Shortcuts" shortcut={formatShortcut("shortcuts")} side="right">
@@ -146,10 +235,10 @@ export function ActivityRail() {
           aria-label="Keyboard Shortcuts"
           onClick={openShortcuts}
         >
-          <Keyboard size={19} weight="regular" />
+          <Keyboard size={18} weight="regular" />
         </ActionIcon>
       </HintTooltip>
-    </nav>
+    </Stack>
   );
 }
 
@@ -162,167 +251,166 @@ function WorkspaceExplorer() {
     contextPaths: state.contextPaths,
     refreshKey: state.refreshKey,
   })));
-  return <ProjectExplorer root={root} api={rpc} onOpen={dock.openFile} activePath={activePath}
+  return <ProjectExplorer root={root} api={rpc} onOpen={(path) => dock.openFile(path)} activePath={activePath}
     selectedContext={contextPaths} onToggleContext={toggleContext} onChooseProject={() => void pickProject()} refreshKey={refreshKey} />;
 }
 
-function WorkspaceHistory() {
-  const { openHistory } = useWorkbench();
-  const [filter, setFilter] = useState("");
-  const history = useWorkbenchState((state) => state.history);
-  const providers = useWorkbenchState((state) => state.providers);
-  const query = filter.trim().toLowerCase();
-  const filtered = query
-    ? history.filter((run) =>
-      run.prompt.toLowerCase().includes(query)
-      || (run.providerName ?? run.providerId).toLowerCase().includes(query)
-      || (run.model ?? "").toLowerCase().includes(query))
-    : history;
-
+function WorkspaceGit() {
+  const { dock, pickProject, attachGitDiff } = useWorkbench();
+  const { root, rpc, refreshKey } = useWorkbenchState(useShallow((state) => ({
+    root: state.workspace?.path ?? null,
+    rpc: state.bridge?.rpc ?? unavailable,
+    refreshKey: state.refreshKey,
+  })));
   return (
-    <>
-      <h2 className="sidebar-heading">Run history</h2>
-      {history.length > 0 && (
-        <div className="sidebar-search-pad">
-          <TextInput
-            size="xs"
-            placeholder="Filter runs…"
-            leftSection={<MagnifyingGlass size={13} />}
-            value={filter}
-            onChange={(event) => setFilter(event.currentTarget.value)}
-            aria-label="Filter run history"
-          />
-        </div>
-      )}
-      <div className="history-list">
-        {filtered.length ? filtered.map((run) => {
-          const provider = run.providerName ?? providers.find((entry) => entry.id === run.providerId)?.name ?? run.providerId;
-          return (
-            <button key={run.id} type="button" className="history-item" onClick={() => void openHistory(run.id)}>
-              <span className="history-prompt">{run.prompt}</span>
-              <span className="history-provider">
-                <ProviderIcon providerId={run.providerId} size={11} framed={false} />
-                <span>{provider}{run.model ? ` · ${shortModelName(run.model)}` : ""}</span>
-              </span>
-              <span>
-                <RunStatus run={run} />
-                <small>{new Date(run.startedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</small>
-              </span>
-            </button>
-          );
-        }) : <p className="sidebar-empty">{query ? "No runs match that filter." : "Completed and active runs appear here."}</p>}
-      </div>
-    </>
+    <GitPanel
+      root={root}
+      api={rpc}
+      refreshKey={refreshKey}
+      onOpenDiff={(path, staged) => dock.openDiff({ mode: "git", path, staged })}
+      onAttachDiff={(staged) => void attachGitDiff(staged)}
+      onChooseProject={() => void pickProject()}
+    />
   );
 }
 
 export function WorkbenchSidebar() {
   const sidebar = useWorkbenchState((state) => state.sidebar);
+  const [width, setWidth] = useState(loadSidebarWidth);
+  const widthRef = useRef(width);
+  const dragging = useRef(false);
+
+  useEffect(() => {
+    function onPointerMove(event: PointerEvent) {
+      if (!dragging.current) return;
+      const next = Math.max(170, Math.min(460, event.clientX - 46));
+      widthRef.current = next;
+      setWidth(next);
+    }
+    function onPointerUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      try {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(widthRef.current));
+      } catch {
+        // Ignore storage errors.
+      }
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
+
   if (!sidebar) return null;
   return (
-    <aside className="sidebar" aria-label={sidebar === "explorer" ? "Project explorer" : "Run history"}>
-      {sidebar === "explorer" ? <WorkspaceExplorer /> : <WorkspaceHistory />}
+    <aside
+      className="sidebar"
+      style={{ flexBasis: `${width}px` }}
+      aria-label={sidebar === "explorer" ? "Project explorer" : sidebar === "git" ? "Git changes" : "Run history"}
+    >
+      <div className="sidebar-inner">
+        {sidebar === "explorer" ? <WorkspaceExplorer /> : sidebar === "git" ? <WorkspaceGit /> : <HistoryPanel />}
+      </div>
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          dragging.current = true;
+          document.body.style.cursor = "col-resize";
+        }}
+      />
     </aside>
   );
 }
 
-export function WorkbenchToolbar() {
-  const { dock, openRules, store } = useWorkbench();
-  const { sidebarOpen, splits } = useWorkbenchState(useShallow((state) => ({
-    sidebarOpen: Boolean(state.sidebar),
-    splits: state.dock.chatPanes.length,
-  })));
-  const toggleLabel = sidebarOpen ? "Hide sidebar" : "Show sidebar";
-  return (
-    <div className="workbench-toolbar">
-      <HintTooltip label={toggleLabel} shortcut={formatShortcut("toggle-explorer")}>
-        <ActionIcon
-          aria-label={toggleLabel}
-          onClick={() => store.setState({ sidebar: sidebarOpen ? null : "explorer" })}
-        >
-          <SidebarSimple size={16} weight={sidebarOpen ? "duotone" : "regular"} />
-        </ActionIcon>
-      </HintTooltip>
-      <div className="workbench-name">
-        <h2>Workbench</h2>
-        <span>{splits} {splits === 1 ? "split" : "splits"}</span>
-      </div>
-      <div className="toolbar-spacer" />
-      <HintTooltip label="Routing rules" shortcut={formatShortcut("open-rules")}>
-        <Button
-          variant="default"
-          size="compact-xs"
-          leftSection={<SlidersHorizontal size={14} weight="duotone" />}
-          onClick={openRules}
-        >
-          Rules
-        </Button>
-      </HintTooltip>
-      <HintTooltip label="Open new model split" shortcut={formatShortcut("new-split")}>
-        <Button
-          variant="default"
-          size="compact-xs"
-          leftSection={<ColumnsPlusRight size={15} weight="duotone" />}
-          onClick={() => dock.newSplit()}
-        >
-          New split
-        </Button>
-      </HintTooltip>
-    </div>
-  );
-}
-
-export function WorkbenchStatus({ onOpenPalette, version }: { onOpenPalette: () => void; version?: string }) {
-  const { openShortcuts } = useWorkbench();
-  const { connected, offline, project, busyRuns } = useWorkbenchState(useShallow((state) => ({
+export function WorkbenchStatus({ version }: { version?: string }) {
+  const { toggleSidebar } = useWorkbench();
+  const { connected, offline, gitBranch, gitChangeCount, busyRuns } = useWorkbenchState(useShallow((state) => ({
     connected: Boolean(state.bridge),
     offline: Boolean(state.connectionError),
-    project: state.workspace?.name,
+    gitBranch: state.gitBranch,
+    gitChangeCount: state.gitChangeCount,
     busyRuns: state.history.filter((run) => run.status === "running").length,
   })));
   return (
-    <footer className="statusbar">
-      <span className="runtime-status">
-        <span className={`state-dot ${connected ? "connected" : ""}`} />
-        {connected ? "Local core connected" : offline ? "Core offline" : "Connecting to local core"}
-      </span>
-      {project && <span className="footer-project"><FolderOpen size={12} weight="duotone" />{project}</span>}
-      <span className="toolbar-spacer" />
-      {!!busyRuns && <span className="status-active">{busyRuns} {busyRuns === 1 ? "run" : "runs"} active</span>}
-      <Button size="compact-xs" variant="subtle" color="gray" className="status-action" onClick={onOpenPalette}>
-        <Group gap={5} wrap="nowrap">
-          <span>Palette</span>
-          <Kbd>{formatShortcut("palette")}</Kbd>
+    <Group component="footer" className="statusbar" justify="space-between" gap="xs" wrap="nowrap">
+      <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
+        <Group gap={6} wrap="nowrap">
+          <span className={`state-dot ${connected ? "connected" : ""}`} />
+          <Text size="11px" c="dimmed" lh={1}>
+            {connected ? "Core connected" : offline ? "Core offline" : "Connecting…"}
+          </Text>
         </Group>
-      </Button>
-      <Button size="compact-xs" variant="subtle" color="gray" className="status-action" onClick={openShortcuts}>
-        <Group gap={5} wrap="nowrap">
-          <span>Shortcuts</span>
-          <Kbd>{formatShortcut("shortcuts")}</Kbd>
-        </Group>
-      </Button>
-      {version && <span>v{version}</span>}
-    </footer>
+        {gitBranch && (
+          <UnstyledButton className="status-branch-btn" onClick={() => toggleSidebar("git")} title="Open Git changes">
+            <Group gap={5} wrap="nowrap">
+              <GitBranch size={12} weight="duotone" />
+              <Text size="11px" lh={1}>{gitBranch}</Text>
+              {gitChangeCount > 0 && <Badge size="xs" variant="light" color="iris" px={5}>{gitChangeCount}</Badge>}
+            </Group>
+          </UnstyledButton>
+        )}
+      </Group>
+
+      <Group gap="sm" wrap="nowrap">
+        {busyRuns > 0 && (
+          <Badge size="xs" variant="light" color="iris" leftSection={<Loader size={9} color="iris" />}>
+            {busyRuns} {busyRuns === 1 ? "run" : "runs"} active
+          </Badge>
+        )}
+        {version && <Text size="11px" c="dimmed" ff="monospace">v{version}</Text>}
+      </Group>
+    </Group>
   );
 }
 
 export function WorkbenchDialogs() {
-  const { core, settings, projectConfirm, pickProject, setRules } = useWorkbench();
+  const { core, settings, projectConfirm, judgeDialog, pickProject, setRules, runJudge } = useWorkbench();
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const { providers, rules, rpc } = useWorkbenchState(useShallow((state) => ({
+  const [pendingRecent, setPendingRecent] = useState<string | undefined>(undefined);
+  const [judgeOpen, setJudgeOpen] = useState(false);
+  const { providers, rules, rpc, lastBroadcastRunIds, details } = useWorkbenchState(useShallow((state) => ({
     providers: state.providers,
     rules: state.rules,
     rpc: state.bridge?.rpc,
+    lastBroadcastRunIds: state.lastBroadcastRunIds,
+    details: state.details,
   })));
 
+  const judgeCandidates = lastBroadcastRunIds
+    .map((id) => details[id])
+    .filter((detail): detail is NonNullable<typeof detail> => Boolean(detail && detail.run.status === "succeeded"));
+
   useEffect(() => {
-    projectConfirm.current = () => setConfirmOpen(true);
+    projectConfirm.current = (recentPath?: string) => {
+      setPendingRecent(recentPath);
+      setConfirmOpen(true);
+    };
     return () => { projectConfirm.current = null; };
   }, [projectConfirm]);
+
+  useEffect(() => {
+    judgeDialog.current = () => setJudgeOpen(true);
+    return () => { judgeDialog.current = null; };
+  }, [judgeDialog]);
 
   return (
     <>
       <SettingsDialog controls={settings} providers={providers} rules={rules} rpc={rpc} onRefresh={core.refreshProviders} onRules={setRules} />
+      <JudgeModal
+        opened={judgeOpen}
+        onClose={() => setJudgeOpen(false)}
+        providers={providers}
+        candidates={judgeCandidates}
+        onRunJudge={(options) => void runJudge(options)}
+      />
       <Modal
         opened={confirmOpen}
         onClose={() => setConfirmOpen(false)}
@@ -337,11 +425,13 @@ export function WorkbenchDialogs() {
           <Button
             color="iris"
             onClick={() => {
+              const target = pendingRecent;
               setConfirmOpen(false);
-              void pickProject(true);
+              setPendingRecent(undefined);
+              void pickProject(true, target);
             }}
           >
-            Choose folder
+            {pendingRecent ? "Open project" : "Choose folder"}
           </Button>
         </Group>
       </Modal>

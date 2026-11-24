@@ -1,10 +1,18 @@
 import { createStore } from "zustand/vanilla";
 import type {
-  EditorSelection, Provider, RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail, RunSummary, WorkspaceInfo,
+  ConversationSummary, EditorSelection, EffortLevel, ProjectRuleFile, Provider,
+  RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail, RunSummary, TextContext, WorkspaceInfo,
 } from "@ide/protocol";
 import type { Bridge } from "./bridge";
 import type { EditorDrafts } from "./editorDrafts";
-import type { PaneConfig } from "./RunPane";
+
+export interface PaneConfig {
+  conversationId?: string;
+  providerId?: string;
+  model?: string;
+  effort?: EffortLevel;
+  mode?: "structured" | "terminal";
+}
 
 export interface ChatPane {
   id: string;
@@ -19,6 +27,10 @@ export interface DockSnapshot {
   filePath?: string;
 }
 
+export type SidebarView = "explorer" | "git" | "history" | null;
+
+export const MAX_CONTEXT_BYTES = 256 * 1024;
+
 export interface WorkbenchState {
   bridge: Bridge | null;
   connectionError: string;
@@ -26,12 +38,18 @@ export interface WorkbenchState {
   providers: Provider[];
   rules: RoutingRule[];
   workspace: WorkspaceInfo | null;
+  recentWorkspaces: string[];
+  gitBranch: string | null;
+  gitChangeCount: number;
+  projectRules: ProjectRuleFile[];
+  includeProjectRules: boolean;
   editorDrafts: EditorDrafts;
   choosingProject: boolean;
   refreshKey: number;
   dock: DockSnapshot;
-  sidebar: "explorer" | "history" | null;
+  sidebar: SidebarView;
   history: RunSummary[];
+  conversations: ConversationSummary[];
   details: Record<string, RunDetail>;
   paneRuns: Record<string, string[]>;
   paneDrafts: Record<string, string>;
@@ -41,10 +59,14 @@ export interface WorkbenchState {
   broadcast: boolean;
   broadcastCollapsed: boolean;
   broadcastTargets: string[];
+  lastBroadcastGroupId: string | null;
+  lastBroadcastRunIds: string[];
   routing: RoutingMode;
   tags: string;
   fallbackIds: string[];
   contextPaths: string[];
+  contextSizes: Record<string, number>;
+  attachments: TextContext[];
   selection: EditorSelection | null;
   submitting: boolean;
   submittingPanes: string[];
@@ -59,12 +81,18 @@ export function createWorkbenchStore() {
     providers: [],
     rules: [],
     workspace: null,
+    recentWorkspaces: [],
+    gitBranch: null,
+    gitChangeCount: 0,
+    projectRules: [],
+    includeProjectRules: true,
     editorDrafts: new Map(),
     choosingProject: false,
     refreshKey: 0,
     dock: { chatPanes: [] },
     sidebar: "explorer",
     history: [],
+    conversations: [],
     details: {},
     paneRuns: {},
     paneDrafts: {},
@@ -72,12 +100,16 @@ export function createWorkbenchStore() {
     composer: "",
     template: null,
     broadcast: true,
-    broadcastCollapsed: false,
+    broadcastCollapsed: true,
     broadcastTargets: [],
+    lastBroadcastGroupId: null,
+    lastBroadcastRunIds: [],
     routing: "manual",
     tags: "",
     fallbackIds: [],
     contextPaths: [],
+    contextSizes: {},
+    attachments: [],
     selection: null,
     submitting: false,
     submittingPanes: [],
@@ -163,4 +195,35 @@ export function isPaneBusy(state: WorkbenchState, pane: ChatPane): boolean {
 
 export function hasBusyDestination(state: WorkbenchState, destinations: ChatPane[]) {
   return destinations.some((pane) => isPaneBusy(state, pane));
+}
+
+export function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+export function estimateContextBudget(state: Pick<
+  WorkbenchState,
+  "contextPaths" | "contextSizes" | "attachments" | "selection" | "projectRules" | "includeProjectRules"
+>) {
+  let bytes = 0;
+  for (const path of state.contextPaths) {
+    bytes += state.contextSizes[path] ?? 0;
+  }
+  for (const attachment of state.attachments) {
+    bytes += utf8Bytes(attachment.text);
+  }
+  if (state.selection) {
+    bytes += utf8Bytes(state.selection.text);
+  }
+  if (state.includeProjectRules) {
+    for (const rule of state.projectRules) {
+      bytes += rule.bytes;
+    }
+  }
+  return {
+    bytes,
+    approxTokens: Math.max(0, Math.round(bytes / 4)),
+    limitBytes: MAX_CONTEXT_BYTES,
+    ratio: bytes / MAX_CONTEXT_BYTES,
+  };
 }

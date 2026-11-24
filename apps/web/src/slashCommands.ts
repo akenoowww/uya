@@ -9,10 +9,13 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "new", aliases: ["clear"], usage: "/new", description: "Start a fresh conversation in this split" },
   { name: "model", usage: "/model <version>", description: "Switch model version (or /model default)", takesArg: true },
+  { name: "effort", usage: "/effort <level>", description: "Set reasoning effort (auto, minimal, low, medium, high, xhigh, max)", takesArg: true },
   { name: "provider", usage: "/provider <name>", description: "Switch provider for this split", takesArg: true },
   { name: "terminal", usage: "/terminal", description: "Toggle interactive terminal mode in this split" },
   { name: "split", usage: "/split", description: "Open a new model split" },
   { name: "broadcast", usage: "/broadcast", description: "Toggle Broadcast multi-model mode" },
+  { name: "judge", usage: "/judge", description: "Cross-review or synthesize latest broadcast responses" },
+  { name: "git", usage: "/git", description: "Toggle Git changes sidebar" },
   { name: "prompts", usage: "/prompts", description: "Open Prompt Library" },
   { name: "providers", usage: "/providers", description: "Manage providers & local runtimes" },
   { name: "rules", usage: "/rules", description: "Edit routing rules" },

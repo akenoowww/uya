@@ -18,6 +18,7 @@ interface CliInvocation {
   env?: NodeJS.ProcessEnv;
   replaceEnv?: boolean;
   diagnosticArgs?: readonly string[];
+  stdin?: string;
   encode?: (text: string) => string;
   parse?: (line: string) => boolean;
 }
@@ -120,8 +121,11 @@ export async function runCli(request: AdapterRequest, prepare: CliPrepare): Prom
     signal.addEventListener("abort", terminate, { once: true });
     if (signal.aborted) terminate();
     child.stdin.on("error", () => undefined);
-    const input = promptForCli(prompt, messages);
-    child.stdin.end(invocation.encode ? invocation.encode(input) : input);
+    const stdinPayload = invocation.stdin ?? (() => {
+      const input = promptForCli(prompt, messages);
+      return invocation.encode ? invocation.encode(input) : input;
+    })();
+    child.stdin.end(stdinPayload);
 
     try {
       let finished = false;

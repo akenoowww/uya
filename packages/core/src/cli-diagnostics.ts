@@ -4,7 +4,7 @@ const cliFlags = [
   "--agent", "--ask-for-approval", "--disable", "--disable-slash-commands", "--disallowedTools",
   "--effort", "--ephemeral", "--format", "--ignore-rules", "--ignore-user-config", "--include-partial-messages",
   "--input-format", "--json", "--max-tool-calls", "--mcp-config", "--model",
-  "--no-chrome", "--no-session-persistence", "--output-format", "--pure", "--safe-mode",
+  "--no-chrome", "--no-interactive", "--no-session-persistence", "--output-format", "--pure", "--safe-mode",
   "--sandbox", "--setting-sources", "--settings", "--skip-git-repo-check",
   "--strict-mcp-config", "--thinking", "--tools", "--variant", "--verbose",
 ];
@@ -13,9 +13,10 @@ const diagnoses = [
   {
     kind: "authentication",
     patterns: [
-      /\b(?:401\s+(?:unauthorized|authentication)|(?:http|status(?: code)?|api error)[:= ]+401)\b/i,
-      /\b(?:invalid[_ -](?:api[_ -]key|credentials)|authentication(?: is)?[_ -](?:failed|required|error))\b/i,
+      /\b(?:401\s+(?:unauthorized|authentication)|(?:http|status(?:[_ ]code)?|api error)"?[:= ]+401)\b/i,
+      /\b(?:invalid[_ -](?:api[_ -]key|credentials)|authentication(?: is)?[_ -](?:failed|required|error)|unauthenticated)\b/i,
       /\b(?:could not find|missing|no) (?:an? )?(?:api[_ -]key|authentication credentials)\b/i,
+      /\bapi[_ -]key (?:is )?not valid\b/i,
       /\b(?:not (?:logged|signed) in|(?:log|sign) in to (?:continue|use))\b/i,
       /\b(?:(?:expired|missing|invalid) (?:access |refresh )?token|(?:access |refresh )?token (?:has )?expired)\b/i,
     ],
@@ -33,7 +34,7 @@ const diagnoses = [
   {
     kind: "rate-limit",
     patterns: [
-      /\b(?:(?:http|status(?: code)?|api error)[:= ]+429|too many requests)\b/i,
+      /\b(?:(?:http|status(?:[_ ]code)?|api error)"?[:= ]+429|too many requests|resource_exhausted)\b/i,
       /\brate[_ -]limit(?:ed|[_ -](?:exceeded|error|reached))\b/i,
     ],
     message: "The provider rate-limited the run. Wait before retrying or select another provider.",

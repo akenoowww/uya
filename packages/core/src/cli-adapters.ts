@@ -7,7 +7,7 @@ import { claudeIsolationArgs } from "./claude";
 import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { customCliCommand, customStructuredBlockReason } from "./custom-cli";
-import { geminiHasUnmanagedSettings, geminiInvocation } from "./gemini";
+import { buildGeminiInteractionBody } from "./gemini";
 import { AdapterError, normalizeEffortLevel, type AdapterOutput, type AdapterRequest, type Usage } from "./provider-adapter";
 
 const codexGlobalArgs = [
@@ -172,38 +172,63 @@ function messageStreamParser(name: string, output: AdapterOutput, usage: Usage, 
   };
 }
 
-function geminiParser(output: AdapterOutput, usage: Usage, args: readonly string[]) {
-  let streamed = false;
+function geminiApiParser(output: AdapterOutput, usage: Usage, args: readonly string[]) {
   return (line: string) => {
-    const event = parseLine(line);
-    if (event.type === "init" && typeof event.model === "string" && isSafeCliModelName(event.model)) {
-      usage.model ??= event.model;
-    } else if (event.type === "message" && event.role === "assistant" && typeof event.content === "string") {
-      if (event.delta !== true && streamed) return false;
-      streamed ||= event.delta === true;
-      output.raw(JSON.stringify({ type: "text", text: event.content }));
-      output.emit("text", event.content);
-    } else if (event.type === "thought" && typeof event.content === "string") {
-      output.raw(JSON.stringify({ type: "thinking", text: event.content }));
-      output.emit("thinking", event.content);
-    } else if (event.type === "error") {
+    const outer = parseLine(line);
+    const event = outer.data && typeof outer.data === "object" && !Array.isArray(outer.data)
+      ? record(outer.data)
+      : outer;
+    const eventType = event.event_type;
+
+    if (eventType === "interaction.created") {
+      const interaction = record(event.interaction);
+      if (typeof interaction.model === "string" && isSafeCliModelName(interaction.model)) {
+        usage.model ??= interaction.model;
+      }
+    } else if (eventType === "step.delta") {
+      const delta = record(event.delta);
+      if (delta.type === "text" && typeof delta.text === "string") {
+        output.raw(line);
+        output.emit("text", delta.text);
+      } else if (delta.type === "thought_summary") {
+        const content = record(delta.content);
+        const text = typeof content.text === "string"
+          ? content.text
+          : typeof delta.text === "string" ? delta.text : undefined;
+        if (text) {
+          output.raw(line);
+          output.emit("thinking", text);
+        }
+      } else if (typeof delta.type === "string" && delta.type.endsWith("_call")) {
+        output.emit("tool", delta.type.replaceAll("_", " "));
+      }
+    } else if (eventType === "error") {
       const error = record(event.error);
       const message = typeof error.message === "string"
         ? error.message
         : typeof event.message === "string" ? event.message : undefined;
       throw new CliResponseError(
-        "Gemini CLI could not complete this run. Check the CLI in Terminal.",
+        "Gemini API could not complete this run. Check authentication (gemini-api whoami / configure).",
         message ? classifyCliDiagnostic(message, args)?.message : undefined,
       );
-    } else if (event.type === "result") {
-      if (event.status !== "success") {
-        const error = record(event.error);
-        throw new CliResponseError("Gemini CLI could not complete this run. Check the CLI in Terminal.",
-          typeof error.message === "string" ? classifyCliDiagnostic(error.message, args)?.message : undefined);
+    } else if (eventType === "interaction.completed") {
+      const interaction = record(event.interaction);
+      if (typeof interaction.model === "string" && isSafeCliModelName(interaction.model)) {
+        usage.model ??= interaction.model;
       }
-      const stats = record(event.stats);
-      usage.inputTokens = tokenCount(stats.input_tokens);
-      usage.outputTokens = tokenCount(stats.output_tokens);
+      const status = typeof interaction.status === "string" ? interaction.status : "completed";
+      if (status === "failed" || status === "cancelled" || status === "budget_exceeded") {
+        const error = record(interaction.error);
+        const message = typeof error.message === "string" ? error.message : status;
+        throw new CliResponseError(
+          "Gemini API could not complete this run. Check authentication and limits in Terminal.",
+          classifyCliDiagnostic(message, args)?.message,
+        );
+      }
+      output.raw(line);
+      const stats = record(interaction.usage);
+      usage.inputTokens = tokenCount(stats.total_input_tokens ?? stats.input_tokens);
+      usage.outputTokens = tokenCount(stats.total_output_tokens ?? stats.output_tokens);
       return true;
     }
     return false;
@@ -305,22 +330,14 @@ export const prepareQwen: CliPrepare = async (request, cwd, usage) => {
   return { ...invocation, env: { QWEN_CODE_TRUSTED_FOLDERS_PATH: trustPath } };
 };
 
-export const prepareGemini: CliPrepare = async (request, cwd, usage) => {
-  const isolated = await geminiInvocation(cwd, "stream-json", request.effort);
+export const prepareGemini: CliPrepare = (request, _cwd, usage) => {
+  const args = ["generate", "--no-interactive", "-o", "json", ...modelArgs(request)];
   return {
-    args: [...modelArgs(request), ...isolated.args],
-    env: {
-      GEMINI_CLI_SYSTEM_SETTINGS_PATH: isolated.settingsPath,
-      GEMINI_CLI_TRUST_WORKSPACE: "true",
-    },
-    encode: literalPrompt,
-    parse: geminiParser(request.output, usage, isolated.args),
+    args,
+    stdin: JSON.stringify(buildGeminiInteractionBody(request)),
+    parse: geminiApiParser(request.output, usage, args),
   };
 };
-
-export function geminiBlocked() {
-  return geminiHasUnmanagedSettings() ? undefined : "System-managed Gemini settings use the interactive terminal.";
-}
 
 function mayExist(path: string): boolean {
   try {

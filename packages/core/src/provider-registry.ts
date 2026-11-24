@@ -1,7 +1,7 @@
 import type { EffortLevel, Provider } from "@ide/protocol";
 import { runCli, type CliPrepare } from "./agents";
 import {
-  geminiBlocked, openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli, prepareGemini, prepareOpenCode, prepareQwen,
+  openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli, prepareGemini, prepareOpenCode, prepareQwen,
 } from "./cli-adapters";
 import {
   discoverCliModels, fallbackCliEfforts, type CliModelDiscoverer, type CliModelDiscovery,
@@ -19,6 +19,7 @@ interface CliDefinition {
   id: string;
   name: string;
   command: string;
+  terminalArgs?: string[];
   prepare?: CliPrepare;
   blocked?: () => string | undefined;
   detail?: string;
@@ -34,7 +35,7 @@ interface CachedCliModels {
 }
 
 function cliAdapter(
-  { id, name, command: configured, prepare, blocked, detail }: CliDefinition,
+  { id, name, command: configured, terminalArgs, prepare, blocked, detail }: CliDefinition,
   discoverModels: CliModelDiscoverer,
 ): ProviderAdapter {
   let cached: CachedCliModels | undefined;
@@ -71,6 +72,7 @@ function cliAdapter(
       const discovered = command && prepare && !unavailable ? await resolveModels(command, refresh) : undefined;
       return {
         id, name, kind: "cli", command,
+        ...(terminalArgs ? { terminalArgs } : {}),
         available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && prepare && !unavailable),
         models: discovered?.models.length ? discovered.models : undefined,
         defaultModel: discovered?.defaultModel,
@@ -179,7 +181,7 @@ export class ProviderRegistry {
     const adapters = [
       cli({ id: "codex", name: "Codex", command: "codex", prepare: prepareCodex }),
       cli({ id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude }),
-      cli({ id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGemini, blocked: geminiBlocked }),
+      cli({ id: "gemini", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGemini }),
       cli({ id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen }),
       cli({
         id: "opencode", name: "OpenCode", command: "opencode", prepare: prepareOpenCode, blocked: openCodeBlocked,

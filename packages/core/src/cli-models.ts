@@ -7,7 +7,12 @@ import { join } from "node:path";
 import { version as clientVersion } from "../package.json";
 import { cliEnv, spawnTarget } from "./agents";
 import { claudeIsolationArgs } from "./claude";
-import { geminiHasUnmanagedSettings, geminiInvocation } from "./gemini";
+import {
+  GEMINI_THINKING_LEVELS,
+  parseGeminiCatalogJson,
+  parseGeminiModelsListJson,
+  parseGeminiSchemaThinkingLevels,
+} from "./gemini";
 import { effortLevels, normalizeEffortLevel } from "./provider-adapter";
 
 export { normalizeEffortLevel } from "./provider-adapter";
@@ -43,7 +48,7 @@ export function fallbackCliEfforts(id: string): EffortLevel[] | undefined {
     case "codex": return ["low", "medium", "high", "xhigh", "max"];
     case "claude":
     case "opencode": return ["low", "medium", "high", "max"];
-    case "gemini": return ["minimal", "low", "medium", "high", "max"];
+    case "gemini": return [...GEMINI_THINKING_LEVELS];
   }
 }
 
@@ -630,39 +635,88 @@ async function discoverAcpModels(
   return result;
 }
 
-function readGeminiConfigDefault(home: string): string | undefined {
-  const settings = parseJsonObject(join(home, ".gemini", "settings.json"));
-  const modelSetting = settings?.model;
-  const configured = typeof modelSetting === "string"
-    ? modelSetting
-    : asObject(modelSetting)?.name;
-  return normalizeDefaultModel(configured);
+async function captureProbeStdout(
+  command: string,
+  args: string[],
+  cwd: string,
+  baseEnv: NodeJS.ProcessEnv | undefined,
+  timeoutMs: number,
+): Promise<string> {
+  const chunks: string[] = [];
+  await runCliProbe({
+    command,
+    args,
+    cwd,
+    baseEnv,
+    timeoutMs,
+    closeStdin: true,
+    onLine(line) {
+      chunks.push(line);
+    },
+  });
+  return chunks.join("\n").trim();
 }
 
 async function discoverGeminiModels(
   command: string,
-  home: string,
   baseEnv: NodeJS.ProcessEnv | undefined,
   timeoutMs: number,
 ): Promise<CliModelDiscovery> {
-  if (!geminiHasUnmanagedSettings(baseEnv)) return { models: [] };
-  const configuredDefault = readGeminiConfigDefault(home);
-
   return withTempDir(async (cwd) => {
-    const isolated = await geminiInvocation(cwd, "acp");
-    const discovered = await discoverAcpModels(
-      command, isolated.args, baseEnv,
-      {
-        GEMINI_CLI_SYSTEM_SETTINGS_PATH: isolated.settingsPath,
-        GEMINI_CLI_TRUST_WORKSPACE: "true",
-      },
-      cwd, timeoutMs,
-    );
-    const defaultModel = discovered.defaultModel ?? configuredDefault;
+    const [liveRaw, catalogRaw, schemaRaw] = await Promise.all([
+      captureProbeStdout(
+        command,
+        ["models", "list", "--no-interactive", "--all", "--max-pages", String(MAX_MODEL_PAGES), "-o", "json"],
+        cwd,
+        baseEnv,
+        timeoutMs,
+      ),
+      captureProbeStdout(command, ["models", "--no-interactive", "-o", "json"], cwd, baseEnv, timeoutMs),
+      captureProbeStdout(command, ["generate", "--schema"], cwd, baseEnv, timeoutMs),
+    ]);
+
+    const schemaEfforts = parseGeminiSchemaThinkingLevels(schemaRaw);
+    const availableEfforts = schemaEfforts.length ? schemaEfforts : fallbackCliEfforts("gemini");
+    const live = parseGeminiModelsListJson(liveRaw);
+    const catalog = parseGeminiCatalogJson(catalogRaw);
+
+    if (live.length > 0) {
+      const liveIds = uniqueModels(live.map((entry) => entry.id));
+      const defaultModel = catalog.defaultModel && liveIds.includes(catalog.defaultModel)
+        ? catalog.defaultModel
+        : undefined;
+      const models = defaultModel
+        ? uniqueModels([defaultModel, ...liveIds])
+        : liveIds;
+      const modelEfforts: Record<string, EffortLevel[]> = {};
+      if (availableEfforts?.length) {
+        for (const entry of live) {
+          if (entry.thinking === true) {
+            modelEfforts[entry.id] = [...availableEfforts];
+          } else if (entry.thinking === false) {
+            modelEfforts[entry.id] = [];
+          }
+        }
+      }
+      return {
+        models,
+        defaultModel,
+        supportedEfforts: availableEfforts,
+        ...(Object.keys(modelEfforts).length ? { modelEfforts } : {}),
+      };
+    }
+
+    const fallbackIds = uniqueModels(catalog.models);
+    const defaultModel = catalog.defaultModel && fallbackIds.includes(catalog.defaultModel)
+      ? catalog.defaultModel
+      : undefined;
+    const models = defaultModel
+      ? uniqueModels([defaultModel, ...fallbackIds])
+      : fallbackIds;
     return {
-      models: uniqueModels([defaultModel, ...discovered.models]),
+      models,
       defaultModel,
-      supportedEfforts: fallbackCliEfforts("gemini"),
+      supportedEfforts: availableEfforts,
     };
   });
 }
@@ -760,7 +814,7 @@ export async function discoverCliModels(
     case "claude":
       return discoverClaudeModels(command, home, options.env, timeoutMs);
     case "gemini":
-      return discoverGeminiModels(command, home, options.env, timeoutMs);
+      return discoverGeminiModels(command, options.env, timeoutMs);
     case "qwen":
       return discoverQwenModels(command, options.env, timeoutMs);
     case "opencode":

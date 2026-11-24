@@ -1,11 +1,11 @@
 import type { EffortLevel } from "@ide/protocol";
 import { expect, spyOn, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "./agents";
-import { geminiBlocked, prepareCodex, prepareOpenCode } from "./cli-adapters";
-import { geminiInvocation } from "./gemini";
+import { prepareCodex, prepareOpenCode } from "./cli-adapters";
+import { buildGeminiInteractionBody, resolveGeminiThinkingLevel } from "./gemini";
 import * as localRuntimes from "./local-runtimes";
 import * as ollama from "./ollama";
 import { ProviderRegistry } from "./provider-registry";
@@ -104,52 +104,59 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"Qwen effort fixtu
   expect(result.events).toEqual([["text", "Qwen effort fixture"]]);
 });
 
-const testGemini = geminiBlocked() ? test.skip : test;
-testGemini("Gemini adapter isolates settings and decodes assistant deltas", async () => {
+test("Gemini API adapter streams Interactions API thought and text deltas with native multi-turn JSON stdin", async () => {
   const result = await runFixture("gemini", `
-case " $* " in *" --extensions none --allowed-mcp-server-names "*" --policy "*" --approval-mode default --output-format stream-json "*) ;; *) exit 2;; esac
-/usr/bin/grep -q '"hooksConfig":{"enabled":false}' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
-/usr/bin/grep -q '"tools":{"core":' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
-/usr/bin/grep -q '"thinkingConfig":{"thinkingLevel":"HIGH"}' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+case " $* " in *" generate --no-interactive -o json "*) ;; *) exit 2;; esac
 payload=$(/bin/cat)
-case "$payload" in *"Keep this answer"*"/goal test"*) ;; *) exit 3;; esac
-case "$payload" in "@"*|"/"*|*"@"*) exit 4;; esac
-printf '%s\\n' '{"type":"message","role":"assistant","content":"Gemini fixture","delta":true}'
-printf '%s\\n' '{"type":"message","role":"assistant","content":"Gemini fixture","delta":false}'
-printf '%s\\n' '{"type":"result","status":"success","stats":{"input_tokens":4,"output_tokens":2}}'
+case "$payload" in *'"store":false'*'"stream":true'*'"thinking_level":"xhigh"'*'"thinking_summaries":"auto"'*) ;; *) exit 3;; esac
+case "$payload" in *'"type":"user_input"'*'First turn'*'"type":"model_output"'*'Keep this answer'*'/goal test @reference'*) ;; *) exit 4;; esac
+printf '%s\\n' '{"data":{"event_type":"interaction.created","interaction":{"id":"v1_1","model":"gemini-4-hydrogen","status":"in_progress"}}}'
+printf '%s\\n' '{"data":{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"Thinking..."}}}}'
+printf '%s\\n' '{"data":{"event_type":"step.delta","index":1,"delta":{"type":"text","text":"Gemini "}}}'
+printf '%s\\n' '{"data":{"event_type":"step.delta","index":1,"delta":{"type":"text","text":"API fixture"}}}'
+printf '%s\\n' '{"data":{"event_type":"interaction.completed","interaction":{"id":"v1_1","model":"gemini-4-hydrogen","status":"completed","usage":{"total_input_tokens":14,"total_output_tokens":6}}}}'
 `, { effort: "max" });
-  expect(result).toEqual({ events: [["text", "Gemini fixture"]], usage: { inputTokens: 4, outputTokens: 2 } });
+  expect(result).toEqual({
+    events: [["thinking", "Thinking..."], ["text", "Gemini "], ["text", "API fixture"]],
+    usage: { model: "gemini-4-hydrogen", inputTokens: 14, outputTokens: 6 },
+  });
 });
 
-test("Gemini writes thinking settings for CLI chat aliases only when effort is set", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "uya-gemini-effort-"));
-  try {
-    for (const [effort, level, budget] of [
-      ["minimal", "MINIMAL", 512], ["low", "LOW", 1024], ["medium", "MEDIUM", 4096],
-      ["high", "HIGH", 8192], ["xhigh", "HIGH", 8192], ["max", "HIGH", 8192],
-    ] as const) {
-      const { settingsPath } = await geminiInvocation(directory, "stream-json", effort);
-      const settings = JSON.parse(await readFile(settingsPath, "utf8"));
-      expect(settings.modelConfigs.customOverrides).toContainEqual({
-        match: { model: "chat-base-3" },
-        modelConfig: { generateContentConfig: { thinkingConfig: { thinkingLevel: level } } },
-      });
-      expect(settings.modelConfigs.customOverrides).toContainEqual({
-        match: { model: "chat-base-2.5" },
-        modelConfig: { generateContentConfig: { thinkingConfig: { thinkingBudget: budget } } },
-      });
-      if (effort === "minimal") {
-        expect(settings.modelConfigs.customOverrides).toContainEqual({
-          match: { model: "gemini-3.1-pro-preview" },
-          modelConfig: { generateContentConfig: { thinkingConfig: { thinkingLevel: "LOW" } } },
-        });
-      }
-    }
-    const { settingsPath } = await geminiInvocation(directory);
-    expect(JSON.parse(await readFile(settingsPath, "utf8"))).not.toHaveProperty("modelConfigs");
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+test("Gemini API request body maps effort dynamically and omits thinking config for non-thinking models", () => {
+  expect(resolveGeminiThinkingLevel("minimal")).toBe("minimal");
+  expect(resolveGeminiThinkingLevel("low")).toBe("low");
+  expect(resolveGeminiThinkingLevel("medium")).toBe("medium");
+  expect(resolveGeminiThinkingLevel("high")).toBe("high");
+  expect(resolveGeminiThinkingLevel("xhigh")).toBe("xhigh");
+  expect(resolveGeminiThinkingLevel("max")).toBe("xhigh");
+  expect(resolveGeminiThinkingLevel(undefined)).toBeUndefined();
+
+  const provider = {
+    id: "gemini",
+    name: "Gemini API",
+    kind: "cli" as const,
+    available: true,
+    terminal: true,
+    structured: true,
+    defaultModel: "gemini-4-hydrogen",
+    modelEfforts: {
+      "gemini-4-hydrogen": ["low", "medium", "high", "xhigh"] as EffortLevel[],
+      "gemma-4-31b-it": [] as EffortLevel[],
+    },
+  };
+
+  expect(buildGeminiInteractionBody({ provider, prompt: "hello", model: "gemma-4-31b-it" })).toEqual({
+    store: false,
+    stream: true,
+    input: [{ type: "user_input", content: [{ type: "text", text: "hello" }] }],
+  });
+  expect(buildGeminiInteractionBody({ provider, prompt: "hello" }).generation_config).toEqual({
+    thinking_summaries: "auto",
+  });
+  expect(buildGeminiInteractionBody({ provider, prompt: "hello", effort: "high" }).generation_config).toEqual({
+    thinking_level: "high",
+    thinking_summaries: "auto",
+  });
 });
 
 test("OpenCode adapter uses the isolated tool-denying agent and parses normalized usage", async () => {
@@ -331,14 +338,12 @@ test("registry keeps refreshed models when an older probe finishes later", async
 test("registry leaves managed and terminal-only providers in the terminal without probing models", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-registry-managed-"));
   const previousPath = process.env.PATH;
-  const previousGeminiSettings = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
   const previousOpenCodeSettings = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR;
   try {
-    for (const id of ["gemini", "opencode", "kimi"]) {
+    for (const id of ["opencode", "kimi"]) {
       await writeFile(join(fixture, id), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     }
     process.env.PATH = fixture;
-    process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = join(fixture, "gemini-settings.json");
     process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = join(fixture, "opencode-settings");
     const calls: string[] = [];
     const managedRegistry = new ProviderRegistry(
@@ -351,7 +356,7 @@ test("registry leaves managed and terminal-only providers in the terminal withou
     );
     for (const refresh of [false, true]) {
       const sources = await managedRegistry.discover(refresh);
-      for (const id of ["gemini", "opencode", "kimi"]) {
+      for (const id of ["opencode", "kimi"]) {
         const provider = sources.find((entry) => entry.id === id);
         expect(provider).toMatchObject({ available: true, terminal: true, structured: false });
         expect(provider?.models).toBeUndefined();
@@ -361,8 +366,6 @@ test("registry leaves managed and terminal-only providers in the terminal withou
     expect(calls).toEqual([]);
   } finally {
     process.env.PATH = previousPath;
-    if (previousGeminiSettings === undefined) delete process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
-    else process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = previousGeminiSettings;
     if (previousOpenCodeSettings === undefined) delete process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR;
     else process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = previousOpenCodeSettings;
     await rm(fixture, { recursive: true, force: true });

@@ -95,7 +95,7 @@ Tauri outputs `Uya.app` & `.dmg` on macOS, and NSIS `.exe` & `.msi` installers o
 
 Configure a [Tauri update signing key pair](https://v2.tauri.app/plugin/updater/#signing-updates) in GitHub Actions. Put the public `.pub` file contents in the repository variable `TAURI_UPDATER_PUBLIC_KEY`. Set the repository secret `TAURI_SIGNING_PRIVATE_KEY` and, for a password-protected key, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Keep the same key pair across releases so installed copies can verify future updates.
 
-Push a `vX.Y.Z` tag matching the app version. The release workflow verifies the signed packages for both Mac architectures and both Windows installer types before publishing `latest.json` with the installers. Uya reads this manifest from the latest stable GitHub release.
+Follow the [release process](CONTRIBUTING.md#publishing-a-release). The release workflow verifies the signed packages for both Mac architectures and both Windows installer types before publishing `latest.json` with the installers. Uya reads this manifest from the latest stable GitHub release.
 
 ## Quick Workflow
 

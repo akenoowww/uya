@@ -50,12 +50,32 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           node <<'NODE'
-          const { version } = require('./package.json');
-          const desktop = require('./apps/desktop/package.json');
-          const tauri = require('./apps/desktop/src-tauri/tauri.conf.json');
-          const tag = process.env.RELEASE_TAG;
-          if (tag !== `v${version}` || desktop.version !== version || tauri.version !== version) {
-            throw new Error(`Version mismatch: tag=${tag}, workspace=${version}, desktop=${desktop.version}, Tauri=${tauri.version}`);
+          const { readFileSync } = require('node:fs');
+          const manifests = [
+            'package.json',
+            'apps/desktop/package.json',
+            'apps/web/package.json',
+            'packages/core/package.json',
+            'packages/protocol/package.json',
+            'apps/desktop/src-tauri/tauri.conf.json',
+          ];
+          const expected = process.env.RELEASE_TAG.slice(1);
+          if (process.env.RELEASE_TAG !== 'v' + require('./package.json').version) {
+            throw new Error('Tag must match the version in package.json.');
+          }
+          for (const manifest of manifests) {
+            if (require('./' + manifest).version !== expected) {
+              throw new Error(manifest + ' must be set to ' + expected + '.');
+            }
+          }
+          const cargo = readFileSync('apps/desktop/src-tauri/Cargo.toml', 'utf8');
+          if (cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1] !== expected) {
+            throw new Error('Cargo.toml must be set to ' + expected + '.');
+          }
+          const heading = '## [' + expected + '] - ';
+          const changelog = readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/);
+          if (!changelog.some((line) => line.startsWith(heading) && /^\d{4}-\d{2}-\d{2}$/.test(line.slice(heading.length)))) {
+            throw new Error('CHANGELOG.md must include a dated release entry for ' + expected + '.');
           }
           NODE
 

@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/akenoowww/uya/releases/latest"><img alt="Шығарылым v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-b4a2ff?style=flat-square" /></a>
+  <a href="https://github.com/akenoowww/uya/releases/latest"><img alt="Соңғы шығарылым" src="https://img.shields.io/github/v/release/akenoowww/uya?style=flat-square&amp;color=b4a2ff" /></a>
   <a href="https://github.com/akenoowww/uya/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akenoowww/uya/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-21232b?style=flat-square" />
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-21232b?style=flat-square" />
@@ -25,7 +25,7 @@
 
 ## Жоба туралы
 
-**v0.1.0** нұсқасында Uya арқылы **macOS** немесе **Windows 10/11** жүйесінде жергілікті жобаны ашып, бір промптты бір немесе бірнеше CLI-агент пен жергілікті модельге қатар жіберуге, олардың жауаптарын сплиттерде салыстыруға, кодты кіріктірілген Monaco редакторында өңдеуге және интерактивті терминалдарды ашуға болады.
+Uya арқылы **macOS** немесе **Windows 10/11** жүйесінде жергілікті жобаны ашып, бір промптты бір немесе бірнеше CLI-агент пен жергілікті модельге қатар жіберуге, олардың жауаптарын сплиттерде салыстыруға, кодты кіріктірілген Monaco редакторында өңдеуге және интерактивті терминалдарды ашуға болады.
 
 - **Параллель сплиттер және Broadcast**: Бірнеше агент пен жергілікті модельді қатар іске қосып салыстыру, әр сплиттің дербес диалогы және **Run History** (іске қосулар тарихы).
 - **Ережелер (Rule-based) және Қосалқы тізбек (Fallback)**: Тег, контексттегі файл кеңейтімі немесе контексттің ең төменгі өлшемі бойынша провайдерді автоматты таңдау, сондай-ақ резервтік провайдерлер тізбегін баптау.
@@ -154,12 +154,6 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
 Smoke-тесттер синтетикалық CLI, жергілікті HTTP-рантаймдар мен проксиді пайдаланады және `127.0.0.1` loopback қолжетімділігін қажет етеді.
-
-## Жол картасы
-
-- **v0.1.0 (Қазіргі нұсқа)**: Көп сплитті жұмыс ортасы, CLI және жергілікті модельдер оркестрациясы, Monaco редакторы, нативті PTY терминалдар, бағыттау/fallback, Prompt Library, SQLite тарихы.
-- **v0.2**: Worktree / Diff / Apply, Eval Matrix, Compare / Judge және диалог тармақтау.
-- **v0.3**: MCP және Skill Studio, плагиндер SDK-сы, пайплайн графтары.
 
 ## Лицензия
 

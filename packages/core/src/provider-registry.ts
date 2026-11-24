@@ -6,7 +6,7 @@ import {
 import {
   discoverCliModels, type CliModelDiscoverer, type CliModelDiscovery,
 } from "./cli-models";
-import { supportsCustomStructured } from "./custom-cli";
+import { customStructuredBlockReason } from "./custom-cli";
 import { discoverLocalRuntimeModels, runLocalRuntime, type LocalRuntimeId } from "./local-runtimes";
 import { discoverOllamaModels, runOllama } from "./ollama";
 import { AdapterError, type AdapterRequest, type ProviderAdapter, type Usage } from "./provider-adapter";
@@ -122,7 +122,7 @@ function runtimeAdapter({ id, name, executable: configured, discoverModels, gene
 
 function customBlocked(provider: Provider) {
   if (provider.structuredArgs === undefined) return "Interactive terminal";
-  return supportsCustomStructured() ? undefined : "Structured mode requires the macOS command sandbox";
+  return customStructuredBlockReason();
 }
 
 export function customAdapter(provider: Provider) {

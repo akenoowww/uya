@@ -32,7 +32,7 @@ Uya lets you open a local project on **macOS** or **Windows 10/11**, send a sing
 - **Built-in Project Explorer & Monaco Editor**: Open files in tabs, attach selected files and active editor selections as prompt context, and get unsaved-draft warnings when switching projects.
 - **Native Interactive Terminals**: Run interactive agent TUIs or a shell right inside any split via native PTYs (macOS PTY / Windows ConPTY).
 - **Prompt Library**: Version project prompts in Git (`<project>/.ai/prompts/`) and keep personal prompts globally (`~/.uya/prompts/`) with `{{variable}}` substitution.
-- **Local-First Security**: Loopback-only Bun sidecar with per-session bearer authentication, workspace confinement, and isolated structured CLI runs.
+- **Local-First Security**: Loopback-only Bun sidecar with per-session bearer authentication, editor access confined to the selected workspace, and sandboxed Structured runs for Custom CLI on macOS.
 
 ## Download & Install
 
@@ -115,10 +115,12 @@ Follow the [release process](CONTRIBUTING.md#publishing-a-release). The release 
 | **OpenCode** | `run --format json --pure` with isolated config & CLI environment auth | Yes (including saved login & managed settings) |
 | **Ollama** | Local HTTP streaming for installed weights | Yes (when `ollama` is installed) |
 | **llama.cpp, MLX, LM Studio** | Local HTTP streaming from a compatible server with an available model | When CLI is installed |
-| **Custom CLI** | Opt-in via **Enable Structured** (prompt via stdin, reply from stdout) | Yes |
+| **Custom CLI** | macOS only, opt-in via **Enable Structured** (prompt via stdin, reply from stdout) | Yes (macOS and Windows) |
 | **Kimi Code** | — | Yes |
 
-Uya probes local runtimes strictly over `127.0.0.1`: **Ollama** on port `11434`, **llama.cpp** on `9931` and `8080`, **MLX** on `8080`, and **LM Studio** on `1234`. Structured mode for Custom CLI restricts filesystem reads, writes, and network access with macOS `sandbox-exec`. Note that remote CLI providers may send the current prompt, attached context, and prior conversation turns to their upstream service.
+On macOS, Structured mode for Custom CLI uses the deprecated `/usr/bin/sandbox-exec` to restrict filesystem reads and writes and block network access. Before enabling Structured mode, Uya checks that macOS can apply its sandbox profile to a test process. If that check fails, Custom CLI is available only in the interactive terminal. On Windows 10/11, Custom CLI runs only in the interactive terminal via ConPTY, with the current user's permissions and without a Uya sandbox.
+
+Uya probes local runtimes strictly over `127.0.0.1`: **Ollama** on port `11434`, **llama.cpp** on `9931` and `8080`, **MLX** on `8080`, and **LM Studio** on `1234`. Remote CLI providers may send the current prompt, attached context, and prior conversation turns to their upstream service.
 
 ## Prompt Library
 
@@ -141,7 +143,7 @@ Review this {{language}} code. Focus: {{focus}}.
 ## Architecture & Security Boundaries
 
 - **Loopback-Only Sidecar**: Tauri manages the local compiled Bun process (`uya-core`). The core binds exclusively to `127.0.0.1` on an ephemeral port and authenticates JSON-RPC and WebSocket calls using a per-session random token passed over IPC.
-- **Isolated Structured Runs**: Structured CLI executions run in temporary directories. Diagnostics classify incompatible flags, auth failures, network errors, and quota issues in memory from `stderr` and surface clean guidance.
+- **Structured CLI Runs**: Each run starts in a temporary working directory. Filesystem and network restrictions depend on the provider adapter and platform. Diagnostics classify incompatible flags, auth failures, network errors, and quota issues in memory from `stderr` and surface clean guidance.
 - **Workspace Confinement**: The built-in editor confines file access to the selected project folder, blocks symlinks/hardlinks and sensitive config files, and checks file revisions on save — while allowing normal source files with names like `credentials.ts`.
 - **SQLite History & Context Budget**: Run history is stored in SQLite with versioned migrations. Conversation continuation keeps the last 12 successful exchanges within 48 KiB; files and selections attach to the current turn. TTFT measures from the start of the responding attempt, while total duration includes fallback switches.
 - **Per-Project Layout State**: Dockview layout and conversation IDs are stored in WebView storage and scoped per project, restoring each split's latest turns when reopening a folder.

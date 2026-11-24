@@ -5,7 +5,7 @@ import { CliResponseError, type CliPrepare } from "./agents";
 import { claudeIsolationArgs } from "./claude";
 import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
-import { customCliCommand, supportsCustomStructured } from "./custom-cli";
+import { customCliCommand, customStructuredBlockReason } from "./custom-cli";
 import { geminiHasUnmanagedSettings, geminiInvocation } from "./gemini";
 import { AdapterError, type AdapterOutput, type AdapterRequest, type Usage } from "./provider-adapter";
 
@@ -351,9 +351,11 @@ export const prepareOpenCode: CliPrepare = (request, cwd, usage) => {
 };
 
 export const prepareCustomCli: CliPrepare = async ({ provider }, cwd) => {
-  if (!provider.command || provider.structuredArgs === undefined || !supportsCustomStructured()) {
-    throw new AdapterError("Custom Structured mode requires the macOS command sandbox.");
+  if (!provider.command || provider.structuredArgs === undefined) {
+    throw new AdapterError("This Custom CLI is not configured for Structured runs.");
   }
+  const reason = customStructuredBlockReason();
+  if (reason) throw new AdapterError(reason);
   return {
     ...await customCliCommand(provider.command, provider.structuredArgs, cwd),
     replaceEnv: true,

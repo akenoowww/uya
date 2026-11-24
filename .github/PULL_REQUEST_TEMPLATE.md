@@ -7,4 +7,4 @@ Describe what this pull request changes and why.
 - [ ] Tested manually in `bun run desktop:dev` (if UI/desktop behavior changed)
 
 ## Related Issues
-Closes #
+<!-- Link any related issues. -->

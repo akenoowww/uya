@@ -4,6 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
+| [Latest stable release](https://github.com/akenoowww/uya/releases/latest) | Yes |
 | `0.1.x` | Yes |
 
 ## Security Architecture Summary
@@ -19,7 +20,7 @@ Uya is designed as a local-first desktop workbench with explicit boundaries:
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
 Instead, report suspected vulnerabilities privately via [GitHub Security Advisories](https://github.com/akenoowww/uya/security/advisories/new) (**Security → Advisories → Report a vulnerability**). Include:
-- Affected version and macOS version
+- Affected Uya version, operating system version, and architecture
 - Clear reproduction steps or proof of concept
 - Impact assessment and any suggested remediation
 

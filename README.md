@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/akenoowww/uya/releases/latest"><img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-b4a2ff?style=flat-square" /></a>
+  <a href="https://github.com/akenoowww/uya/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/akenoowww/uya?style=flat-square&amp;color=b4a2ff" /></a>
   <a href="https://github.com/akenoowww/uya/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akenoowww/uya/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-21232b?style=flat-square" />
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-21232b?style=flat-square" />
@@ -25,7 +25,7 @@
 
 ## Overview
 
-In **v0.1.0**, Uya lets you open a local project on **macOS** or **Windows 10/11**, send a single prompt to one or multiple CLI agents and local models in parallel splits, compare their answers side-by-side, inspect files in a built-in Monaco editor, and launch native interactive terminals without leaving the workbench.
+Uya lets you open a local project on **macOS** or **Windows 10/11**, send a single prompt to one or multiple CLI agents and local models in parallel splits, compare their answers side-by-side, inspect files in a built-in Monaco editor, and launch native interactive terminals without leaving the workbench.
 
 - **Parallel Splits & Broadcast**: Compare multiple agents or local models simultaneously, with independent conversation threads per split and **Run History**.
 - **Rule-Based & Fallback Routing**: Route prompts automatically by tag, context file extension, or minimum context size, or define ordered fallback chains.
@@ -155,12 +155,6 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
 Smoke tests use synthetic CLI fixtures, local HTTP runtimes, and proxy checks and require loopback (`127.0.0.1`) access.
-
-## Roadmap
-
-- **v0.1.0 (Current)**: Multi-split workbench, CLI & local runtime orchestration, Monaco editor, native PTY terminals, routing/fallback, Prompt Library, SQLite history.
-- **v0.2**: Worktree / Diff / Apply, Eval Matrix, Compare / Judge, conversation branching.
-- **v0.3**: MCP & Skill Studio, Plugin SDK, pipeline graphs.
 
 ## License
 

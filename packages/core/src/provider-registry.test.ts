@@ -206,13 +206,13 @@ test("registry keeps refreshed models when an older probe finishes later", async
   }
 });
 
-test("registry leaves managed providers in the terminal without probing models", async () => {
+test("registry leaves managed and terminal-only providers in the terminal without probing models", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-registry-managed-"));
   const previousPath = process.env.PATH;
   const previousGeminiSettings = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
   const previousOpenCodeSettings = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR;
   try {
-    for (const id of ["gemini", "opencode"]) {
+    for (const id of ["gemini", "opencode", "kimi"]) {
       await writeFile(join(fixture, id), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     }
     process.env.PATH = fixture;
@@ -229,7 +229,7 @@ test("registry leaves managed providers in the terminal without probing models",
     );
     for (const refresh of [false, true]) {
       const sources = await managedRegistry.discover(refresh);
-      for (const id of ["gemini", "opencode"]) {
+      for (const id of ["gemini", "opencode", "kimi"]) {
         const provider = sources.find((entry) => entry.id === id);
         expect(provider).toMatchObject({ available: true, terminal: true, structured: false });
         expect(provider?.models).toBeUndefined();

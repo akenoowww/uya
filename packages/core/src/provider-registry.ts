@@ -68,7 +68,7 @@ function cliAdapter(
     async discover(refresh = false) {
       const command = executable(configured);
       const unavailable = command ? blocked?.() : "Executable missing from PATH";
-      const discovered = command && !unavailable ? await resolveModels(command, refresh) : undefined;
+      const discovered = command && prepare && !unavailable ? await resolveModels(command, refresh) : undefined;
       return {
         id, name, kind: "cli", command,
         available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && prepare && !unavailable),

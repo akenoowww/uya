@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { access, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { version as clientVersion } from "../package.json";
@@ -139,6 +140,51 @@ test("falls back to Codex local CLI cache when app-server is unavailable", async
   }
 });
 
+test("measures the config size limit in bytes before decoding", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-oversized-config-"));
+  try {
+    const command = await createFakeCli(fixture, "codex", "process.exit(1);");
+    await writeFile(join(fixture, "config.toml"), 'model = "ignored-model"\n#' + "é".repeat(1024 * 1024));
+    expect(await discoverCliModels("codex", {
+      command, home: fixture, env: { ...fixtureEnv(), CODEX_HOME: fixture }, timeoutMs: 2_000,
+    })).toEqual({ models: [], defaultModel: undefined });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32")("reads a symlink to a regular config and skips a symlink to a FIFO", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-symlink-config-"));
+  try {
+    const command = await createFakeCli(fixture, "codex", "process.exit(1);");
+    const config = join(fixture, "config.toml");
+    const regular = join(fixture, "regular.toml");
+    await writeFile(regular, 'model = "fixture-model"');
+    await symlink(regular, config);
+    expect(await discoverCliModels("codex", {
+      command, home: fixture, env: { CODEX_HOME: fixture }, timeoutMs: 2_000,
+    })).toEqual({ models: ["fixture-model"], defaultModel: "fixture-model" });
+
+    const fifo = join(fixture, "fifo");
+    await unlink(config);
+    execFileSync("mkfifo", [fifo], { stdio: "ignore", timeout: 1_000 });
+    await symlink(fifo, config);
+    // Keep the test process responsive if a future regression blocks on opening the FIFO.
+    const output = execFileSync(process.execPath, [
+      "--no-env-file", "-e",
+      `import { discoverCliModels } from ${JSON.stringify(import.meta.resolve("./cli-models"))};
+       const [command, fixture] = process.argv.slice(-2);
+       console.log(JSON.stringify(await discoverCliModels("codex", {
+         command, home: fixture, env: { CODEX_HOME: fixture }, timeoutMs: 1_000,
+       })));`,
+      command, fixture,
+    ], { encoding: "utf8", env: {}, timeout: 3_000 });
+    expect(JSON.parse(output)).toEqual({ models: [] });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("discovers Claude models via stream-json initialize control_request", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-claude-"));
   try {
@@ -260,7 +306,7 @@ test("leaves a managed Gemini CLI for the interactive terminal", async () => {
   }
 });
 
-test("discovers Qwen and Kimi models via ACP configOptions (flat and grouped)", async () => {
+test("discovers Qwen models via flat and grouped ACP model options", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-acp-"));
   try {
     const qwen = await createFakeCli(fixture, "qwen", `
@@ -286,43 +332,7 @@ rl.on("line", (line) => {
             currentValue: "qwen3-coder-next",
             options: [
               { value: "qwen3-coder-next", name: "Qwen3 Coder Next" },
-              { value: "qwen3-max-latest", name: "Qwen3 Max" },
-            ],
-          },
-        ],
-      },
-    }));
-  }
-});
-`);
-
-    const kimi = await createFakeCli(fixture, "kimi", `
-import readline from "node:readline";
-const args = process.argv.slice(2);
-if (args[0] !== "acp") process.exit(2);
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.method === "initialize") {
-    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }));
-  } else if (msg.method === "session/new") {
-    console.log(JSON.stringify({
-      jsonrpc: "2.0",
-      id: msg.id,
-      result: {
-        sessionId: "kimi-1",
-        configOptions: [
-          {
-            configId: "model",
-            currentValue: "kimi-code/k3",
-            options: [
-              {
-                group: "recommended",
-                options: [
-                  { value: "kimi-code/k3" },
-                  { value: "kimi-code/k3.1-pro" },
-                ],
-              },
+              { group: "recommended", options: [{ value: "qwen3-max-latest", name: "Qwen3 Max" }] },
             ],
           },
         ],
@@ -335,10 +345,6 @@ rl.on("line", (line) => {
     expect(await discoverCliModels("qwen", { command: qwen, home: fixture, env: fixtureEnv(), timeoutMs: 3_000 })).toEqual({
       defaultModel: "qwen3-coder-next",
       models: ["qwen3-coder-next", "qwen3-max-latest"],
-    });
-    expect(await discoverCliModels("kimi", { command: kimi, home: fixture, env: fixtureEnv(), timeoutMs: 3_000 })).toEqual({
-      defaultModel: "kimi-code/k3",
-      models: ["kimi-code/k3", "kimi-code/k3.1-pro"],
     });
   } finally {
     await rm(fixture, { recursive: true, force: true });

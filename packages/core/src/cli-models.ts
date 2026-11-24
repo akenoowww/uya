@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,8 +86,27 @@ function uniqueModels(candidates: Iterable<unknown>): string[] {
 
 function readBoundedText(path: string): string | undefined {
   try {
-    const content = readFileSync(path, "utf8");
-    return content.length <= MAX_CONFIG_BYTES ? content : undefined;
+    const candidate = statSync(path);
+    if (!candidate.isFile() || candidate.size > MAX_CONFIG_BYTES) return undefined;
+
+    // On POSIX a path replaced with a FIFO between stat and open must not block.
+    const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK | constants.O_NOCTTY);
+    const fd = openSync(path, flags);
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || opened.size > MAX_CONFIG_BYTES) return undefined;
+      const buffer = Buffer.allocUnsafe(opened.size + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const count = readSync(fd, buffer, offset, buffer.length - offset, null);
+        if (count === 0) return buffer.toString("utf8", 0, offset);
+        offset += count;
+      }
+      // A file that grew during the read can be reconsidered on the next refresh.
+      return undefined;
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return undefined;
   }
@@ -624,21 +643,6 @@ async function discoverQwenModels(
   ));
 }
 
-async function discoverKimiModels(
-  command: string,
-  baseEnv: NodeJS.ProcessEnv | undefined,
-  timeoutMs: number,
-): Promise<CliModelDiscovery> {
-  return withTempDir((cwd) => discoverAcpModels(
-    command,
-    ["acp"],
-    baseEnv,
-    undefined,
-    cwd,
-    timeoutMs,
-  ));
-}
-
 function readOpenCodeConfigDefault(home: string, env: NodeJS.ProcessEnv): string | undefined {
   const configBase = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim()
     ? env.XDG_CONFIG_HOME
@@ -720,8 +724,6 @@ export async function discoverCliModels(
       return discoverGeminiModels(command, home, options.env, timeoutMs);
     case "qwen":
       return discoverQwenModels(command, options.env, timeoutMs);
-    case "kimi":
-      return discoverKimiModels(command, options.env, timeoutMs);
     case "opencode":
       return discoverOpenCodeModels(command, home, options.env, timeoutMs, refresh);
     default:

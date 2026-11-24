@@ -31,6 +31,7 @@ function boundedArray<T extends z.ZodType>(item: T, limit: number, error: string
 
 const projectPath = text("Project path", 4096);
 const filePath = text("File path", 4096);
+const fileText = text("File content", 1_048_576, true);
 const revision = text("Revision", 256);
 const providerId = text("Provider ID", 100);
 const runId = text("Run ID", 100);
@@ -105,8 +106,28 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "workspace.open": z.object({ path: projectPath }),
   "workspace.close": z.object({ path: projectPath }),
   "workspace.list": z.object({ path: text("Directory path", 4096, true).optional(), workspacePath: projectPath.optional() }),
+  "workspace.files": z.object({
+    query: text("File query", 4096, true).optional(),
+    limit: integer("Result limit", 1, 500).optional(),
+    workspacePath: projectPath.optional(),
+  }),
   "workspace.read": z.object({ path: filePath, workspacePath: projectPath.optional() }),
-  "workspace.write": z.object({ path: filePath, text: text("File content", 1_048_576, true), revision, workspacePath: projectPath.optional() }),
+  "workspace.write": z.object({ path: filePath, text: fileText, revision, workspacePath: projectPath.optional() }),
+  "workspace.create": z.object({
+    path: filePath,
+    kind: z.enum(["file", "directory"], { error: "Choose a file or directory." }),
+    text: fileText.optional(),
+    workspacePath: projectPath.optional(),
+  }),
+  "workspace.rename": z.object({ from: filePath, to: filePath, workspacePath: projectPath.optional() }),
+  "workspace.remove": z.object({ path: filePath, workspacePath: projectPath.optional() }),
+  "workspace.projectRules": z.object({ workspacePath: projectPath.optional() }),
+  "git.status": z.object({ workspacePath: projectPath.optional() }),
+  "git.diff": z.object({
+    path: filePath.optional(),
+    staged: z.boolean({ error: "Staged must be a boolean." }).optional(),
+    workspacePath: projectPath.optional(),
+  }),
   "prompts.list": z.object({}),
   "prompts.read": z.object({ ref: promptRef }),
   "prompts.write": z.object({ ref: promptRef, source: text("Prompt source", 1_048_576, true), revision: revision.optional() }),

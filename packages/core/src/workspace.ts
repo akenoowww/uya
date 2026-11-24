@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
 import type {
   DirectoryEntry,
+  ProjectRuleFile,
   PromptDocument,
   PromptRef,
   PromptSummary,
@@ -13,11 +14,15 @@ import type {
 } from "@ide/protocol";
 import {
   canonicalDirectory,
+  createEntry,
   listDirectory,
+  listWorkspaceFiles,
   MAX_TEXT_BYTES,
   promptDirectory,
   readText,
   relativePath,
+  removeEntry,
+  renameEntry,
   validateText,
   WorkspaceError,
   writeText,
@@ -29,6 +34,8 @@ const PROMPT_SUFFIX = ".prompt.md";
 const MAX_FRONT_MATTER = 64 * 1024;
 const MAX_CONTEXT_BYTES = 256 * 1024;
 const MAX_SELECTION_BYTES = 128 * 1024;
+const MAX_PROJECT_RULE_BYTES = 64 * 1024;
+const PROJECT_RULE_PATHS = ["AGENTS.md", "CLAUDE.md", ".uya/rules.md", ".cursorrules", ".github/copilot-instructions.md"];
 const VARIABLE_NAME = /^[A-Za-z_][\w-]*$/u;
 const PLACEHOLDER = /\{\{[ \t]*([A-Za-z_][\w-]*)[ \t]*\}\}/gu;
 
@@ -109,7 +116,7 @@ function readVariables(declared: unknown, body: string): PromptVariable[] {
 
 function parsePrompt(ref: PromptRef, file: TextFile): PromptDocument {
   const { metadata, body } = splitPrompt(file.text);
-  const { title, providerId, mode, variables } = metadata;
+  const { title, providerId, effort, mode, variables } = metadata;
   if (title !== undefined && (typeof title !== "string" || !title.trim())) {
     throw invalidPrompt("The prompt title must be nonempty text.");
   }
@@ -119,6 +126,10 @@ function parsePrompt(ref: PromptRef, file: TextFile): PromptDocument {
   if (mode !== undefined && mode !== "manual" && mode !== "rule" && mode !== "fallback") {
     throw invalidPrompt("Use manual, rule or fallback for mode.");
   }
+  if (effort !== undefined && effort !== "minimal" && effort !== "low" && effort !== "medium" &&
+    effort !== "high" && effort !== "xhigh" && effort !== "max") {
+    throw invalidPrompt("Use minimal, low, medium, high, xhigh or max for effort.");
+  }
   return {
     ref,
     title: typeof title === "string" ? title : promptTitle(ref),
@@ -127,6 +138,7 @@ function parsePrompt(ref: PromptRef, file: TextFile): PromptDocument {
     body,
     variables: readVariables(variables, body),
     ...(typeof providerId === "string" ? { providerId } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(mode ? { mode } : {}),
   };
 }
@@ -164,7 +176,6 @@ function fillPrompt(document: PromptDocument, values: Record<string, string>): s
 export class Workspace {
   private root?: string;
   private selectionVersion = 0;
-  private readonly saves = new Map<string, Promise<void>>();
   private readonly globalBase: string;
   private readonly globalParts: string[];
 
@@ -198,30 +209,52 @@ export class Workspace {
     return listDirectory(this.requireRoot(), path);
   }
 
-  async read({ path }: { path: string }): Promise<TextFile> {
-    return readText(this.requireRoot(), path);
+  async files({ query, limit }: { query?: string; limit?: number } = {}): Promise<string[]> {
+    return listWorkspaceFiles(this.requireRoot(), query, limit);
   }
 
-  private async save(root: string, path: string, text: string, revision?: string): Promise<TextFile> {
-    const key = `${root}/${path}`.normalize("NFC").toLowerCase();
-    const preceding = this.saves.get(key);
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
-    this.saves.set(key, pending);
-    try {
-      await preceding;
-      return await writeText(root, path, text, revision);
-    } finally {
-      if (this.saves.get(key) === pending) this.saves.delete(key);
-      release();
-    }
+  async create({ path, kind, text }: { path: string; kind: "file" | "directory"; text?: string }): Promise<DirectoryEntry> {
+    return createEntry(this.requireRoot(), path, kind, text);
+  }
+
+  async rename({ from, to }: { from: string; to: string }): Promise<DirectoryEntry> {
+    return renameEntry(this.requireRoot(), from, to);
+  }
+
+  async remove({ path }: { path: string }): Promise<void> {
+    return removeEntry(this.requireRoot(), path);
+  }
+
+  async read({ path }: { path: string }): Promise<TextFile> {
+    return readText(this.requireRoot(), path);
   }
 
   async write({ path, text, revision }: { path: string; text: string; revision: string }): Promise<TextFile> {
     if (typeof revision !== "string" || !revision) {
       throw new WorkspaceError("INVALID_INPUT", "Open the file before saving.");
     }
-    return this.save(this.requireRoot(), path, text, revision);
+    return writeText(this.requireRoot(), path, text, revision);
+  }
+
+  async projectRules(): Promise<ProjectRuleFile[]> {
+    return (await this.readProjectRulesContext()).map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) }));
+  }
+
+  async readProjectRulesContext(): Promise<TextContext[]> {
+    const root = this.root;
+    if (root === undefined) return [];
+    const context: TextContext[] = [];
+    let remaining = MAX_PROJECT_RULE_BYTES;
+    for (const path of PROJECT_RULE_PATHS) {
+      try {
+        const { text } = await readText(root, path, remaining);
+        remaining -= Buffer.byteLength(text);
+        context.push({ path, text });
+      } catch (error) {
+        if (!(error instanceof WorkspaceError)) throw error;
+      }
+    }
+    return context;
   }
 
   async context(paths: string[]): Promise<TextContext[]> {
@@ -317,6 +350,7 @@ export class Workspace {
       text: fillPrompt(document, values),
       revision: document.revision,
       ...(document.providerId ? { providerId: document.providerId } : {}),
+      ...(document.effort !== undefined ? { effort: document.effort } : {}),
       ...(document.mode ? { mode: document.mode } : {}),
     };
   }
@@ -331,6 +365,6 @@ export class Workspace {
     const root = await this.library(ref.scope, revision === undefined);
     if (root === undefined) throw new WorkspaceError("NOT_FOUND", "The prompt library does not exist yet.");
     if (revision === undefined) await promptDirectory(root, parts.slice(0, -1), true);
-    return parsePrompt(ref, await this.save(root, ref.path, source, revision));
+    return parsePrompt(ref, await writeText(root, ref.path, source, revision));
   }
 }

@@ -140,6 +140,35 @@ export interface RenderedPrompt {
   mode?: RoutingMode;
 }
 
+export type GitFileStatus = "modified" | "added" | "deleted" | "renamed" | "untracked";
+
+export interface GitFileChange {
+  path: string;
+  status: GitFileStatus;
+  staged: boolean;
+}
+
+export interface GitStatus {
+  isRepo: boolean;
+  branch?: string;
+  ahead?: number;
+  behind?: number;
+  changes: GitFileChange[];
+}
+
+export interface GitDiffResult {
+  path?: string;
+  staged: boolean;
+  diff: string;
+  original?: string;
+  modified?: string;
+}
+
+export interface ProjectRuleFile {
+  path: string;
+  bytes: number;
+}
+
 type Empty = Record<string, never>;
 
 export interface RpcMethods {
@@ -157,8 +186,15 @@ export interface RpcMethods {
   "workspace.open": [{ path: string }, WorkspaceInfo];
   "workspace.close": [{ path: string }, null];
   "workspace.list": [{ path?: string; workspacePath?: string }, DirectoryEntry[]];
+  "workspace.files": [{ query?: string; limit?: number; workspacePath?: string }, string[]];
   "workspace.read": [{ path: string; workspacePath?: string }, TextFile];
   "workspace.write": [{ path: string; text: string; revision: string; workspacePath?: string }, TextFile];
+  "workspace.create": [{ path: string; kind: "file" | "directory"; text?: string; workspacePath?: string }, DirectoryEntry];
+  "workspace.rename": [{ from: string; to: string; workspacePath?: string }, DirectoryEntry];
+  "workspace.remove": [{ path: string; workspacePath?: string }, null];
+  "workspace.projectRules": [{ workspacePath?: string }, ProjectRuleFile[]];
+  "git.status": [{ workspacePath?: string }, GitStatus];
+  "git.diff": [{ path?: string; staged?: boolean; workspacePath?: string }, GitDiffResult];
   "prompts.list": [Empty, PromptSummary[]];
   "prompts.read": [{ ref: PromptRef }, PromptDocument];
   "prompts.write": [{ ref: PromptRef; source: string; revision?: string }, PromptDocument];

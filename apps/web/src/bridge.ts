@@ -9,8 +9,11 @@ export interface Bridge {
   rpc: RpcCall;
   subscribe: (id: string, after: number, onEvent: (event: RunEvent) => void, onClose: () => void) => () => void;
   chooseFolder: () => Promise<string | null>;
+  listRecentFolders: () => Promise<string[]>;
+  prepareRecentFolder: (path: string) => Promise<string>;
   activateFolder: (path: string) => Promise<void>;
   watchFolder: (notify: (path: string) => void) => Promise<() => void>;
+  openExternalUrl: (url: string) => Promise<void>;
   openTerminal: (options: {
     cwd?: string;
     program?: string;
@@ -60,8 +63,11 @@ export async function connect(): Promise<Bridge> {
       };
     },
     chooseFolder: () => invoke("select_workspace"),
+    listRecentFolders: () => invoke<string[]>("list_recent_workspaces").catch(() => []),
+    prepareRecentFolder: (path) => invoke<string>("prepare_recent_workspace", { path }),
     activateFolder: (path) => invoke("activate_workspace", { path }),
     watchFolder: (notify) => listen<string>("workspace-changed", ({ payload }) => notify(payload)),
+    openExternalUrl: (url) => invoke("open_external_url", { url }),
     openTerminal(options, onEvent) {
       const channel = new Channel<PtyEvent>();
       channel.onmessage = onEvent;

@@ -1,4 +1,4 @@
-import { constants, accessSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { realpath } from "node:fs/promises";
 
 const sandbox = "/usr/bin/sandbox-exec";
@@ -37,19 +37,7 @@ const profile = `(version 1)
   (subpath (param "UYA_RUN_DIR")))))
 `;
 
-export function supportsCustomStructured(): boolean {
-  if (process.platform !== "darwin") return false;
-  try {
-    accessSync(sandbox, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function customCliCommand(command: string, args: readonly string[], directory: string) {
-  const executable = await realpath(command);
-  const runDir = await realpath(directory);
+function sandboxInvocation(executable: string, args: readonly string[], runDir: string) {
   return {
     command: sandbox,
     args: [
@@ -58,4 +46,28 @@ export async function customCliCommand(command: string, args: readonly string[],
     ],
     env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "en_US.UTF-8", TMPDIR: runDir },
   };
+}
+
+let sandboxStarts: boolean | undefined;
+
+export function customStructuredBlockReason(): string | undefined {
+  if (process.platform !== "darwin") return "Custom CLI Structured mode is available only on macOS.";
+  if (sandboxStarts === undefined) {
+    // The executable can exist even when macOS refuses to apply the sandbox profile.
+    const cwd = "/private/var/empty";
+    const probe = sandboxInvocation("/usr/bin/true", [], cwd);
+    const { status } = spawnSync(probe.command, probe.args, {
+      cwd,
+      env: probe.env,
+      stdio: "ignore",
+      timeout: 1_500,
+      killSignal: "SIGKILL",
+    });
+    sandboxStarts = status === 0;
+  }
+  if (!sandboxStarts) return "The macOS sandbox could not start. Custom CLI is available in Terminal.";
+}
+
+export async function customCliCommand(command: string, args: readonly string[], directory: string) {
+  return sandboxInvocation(await realpath(command), args, await realpath(directory));
 }

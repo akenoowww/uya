@@ -4,6 +4,17 @@ All notable changes to **Uya** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-11-25
+
+### Added
+
+- **Google Antigravity OAuth Provider (`antigravity`, `agy`)**: Added native ACP integration (`agy acp --sandbox --disable-telemetry`) with Google AI Pro / Ultra OAuth support, live model and per-model effort discovery (`configOptions` + `models.availableModels` with `agy models` fallback), read-only `session/request_permission` denial, streaming thought/text/tool events, custom provider icon, and interactive TUI `--model` / `--effort` forwarding.
+- **Restored Gemini CLI (`gemini`) Alongside Gemini API (`gemini-api`)**: Users can now choose between **Antigravity** (`agy`, Google OAuth), **Gemini CLI** (`gemini`, Google OAuth / API key / Vertex AI with isolated read-only policy and live ACP + `gemini models list -o json` discovery), and **Gemini API** (`gemini-api`, Interactions API with live `models list` + `generate --schema`).
+
+### Fixed
+
+- Classified zero-limit Free Tier (`limit: 0` / `upgrade your tier`), `quota_exceeded`, and `payment_required` (`402`) API errors as quota/tier diagnostics instead of transient rate-limit retries, and expanded ACP authentication error recognition.
+
 ## [0.3.1] - 2026-11-25
 
 ### Changed
@@ -79,6 +90,7 @@ Initial public release of **Uya** — a local-first multi-agent AI workbench for
 - **Local Persistence & Security**: Tauri + compiled Bun sidecar communicating over random-port loopback (`127.0.0.1`) with per-session auth tokens, versioned SQLite migrations, and per-project Dockview layout/conversation restoration.
 - **Cross-Platform Distribution**: Native macOS `.app` / `.dmg` (Apple Silicon & Intel) and Windows 10/11 NSIS `.exe` / `.msi` installers with custom **Uya** iconography and automated GitHub Actions CI & release workflows.
 
+[0.3.2]: https://github.com/akenoowww/uya/releases/tag/v0.3.2
 [0.3.1]: https://github.com/akenoowww/uya/releases/tag/v0.3.1
 [0.3.0]: https://github.com/akenoowww/uya/releases/tag/v0.3.0
 [0.2.1]: https://github.com/akenoowww/uya/releases/tag/v0.2.1

@@ -1,6 +1,6 @@
 [package]
 name = "uya"
-version = "0.3.1"
+version = "0.3.2"
 description = "Uya — local-first multi-agent AI workbench for macOS and Windows"
 homepage = "https://github.com/akenoowww/uya"
 repository = "https://github.com/akenoowww/uya"

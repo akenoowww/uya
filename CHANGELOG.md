@@ -4,6 +4,18 @@ All notable changes to **Uya** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-25
+
+### Changed
+
+- **Official `gemini-api` CLI Integration**: Migrated the built-in Gemini provider (`id: "gemini"`, **Gemini API**) to Google's official `gemini-api` CLI and stateless **Gemini Interactions API** (`generate --no-interactive -o json` with native multi-turn JSON stdin, `thought_summary` and `text` SSE streaming, and `gemini-api explore` in Terminal mode).
+- **Dynamic API Model & Thinking Discovery**: Queries live Gemini models and per-model `thinking` capabilities via `gemini-api models list`, reads supported `ThinkingLevel` values from `gemini-api generate --schema`, and uses `gemini-api models` for the default model and pre-auth fallback with zero hardcoded model lists.
+
+### Fixed
+
+- Classified structured `gemini-api` JSON authentication (`authentication_error` / `UNAUTHENTICATED`) and rate-limit (`rate_limit_error` / `RESOURCE_EXHAUSTED`) errors cleanly in run diagnostics.
+- Hid the per-split `EffortPicker` automatically when the live API reports `thinking: false` for the selected model.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
@@ -67,6 +79,7 @@ Initial public release of **Uya** — a local-first multi-agent AI workbench for
 - **Local Persistence & Security**: Tauri + compiled Bun sidecar communicating over random-port loopback (`127.0.0.1`) with per-session auth tokens, versioned SQLite migrations, and per-project Dockview layout/conversation restoration.
 - **Cross-Platform Distribution**: Native macOS `.app` / `.dmg` (Apple Silicon & Intel) and Windows 10/11 NSIS `.exe` / `.msi` installers with custom **Uya** iconography and automated GitHub Actions CI & release workflows.
 
+[0.3.1]: https://github.com/akenoowww/uya/releases/tag/v0.3.1
 [0.3.0]: https://github.com/akenoowww/uya/releases/tag/v0.3.0
 [0.2.1]: https://github.com/akenoowww/uya/releases/tag/v0.2.1
 [0.2.0]: https://github.com/akenoowww/uya/releases/tag/v0.2.0

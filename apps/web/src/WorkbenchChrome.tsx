@@ -1,23 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ActionIcon, Badge, Box, Button, Group, Indicator, Kbd, Loader, Menu, Modal, Stack, Text, UnstyledButton,
+  ActionIcon, Badge, Box, Button, Group, Indicator, Kbd, Loader, Menu, Modal, Popover, ScrollArea,
+  Stack, Text, TextInput, UnstyledButton,
 } from "@mantine/core";
 import {
-  BookOpen, CaretDown, ChartBar, ClockCounterClockwise, ColumnsPlusRight, Files,
-  FolderOpen, GitBranch, Keyboard, MagnifyingGlass, PlugsConnected, TerminalWindow,
+  BookOpen, Bug, CaretDown, ChartBar, Check, CheckCircle, ClockCounterClockwise, ColumnsPlusRight,
+  Files, FolderOpen, GitBranch, Keyboard, MagnifyingGlass, Play, PlugsConnected, Stop,
+  TerminalWindow, XCircle,
 } from "@phosphor-icons/react";
 import { isTauri } from "@tauri-apps/api/core";
+import type { GitBranch as GitBranchInfo } from "@ide/protocol";
 import { useShallow } from "zustand/react/shallow";
+import { errorMessage } from "./bridge";
 import { JudgeModal } from "./components/JudgeModal";
 import { UyaBrandMark } from "./components/ProviderIcon";
 import { HintTooltip } from "./components/Tooltip";
 import { GitPanel } from "./GitPanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { ProjectExplorer } from "./ProjectExplorer";
+import { SearchPanel } from "./SearchPanel";
 import { SettingsDialog } from "./SettingsDialog";
 import { formatShortcut, isMac } from "./shortcuts";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
-import { unavailable, workspaceLabel } from "./workbenchStore";
+import { formatDurationCompact, unavailable, workspaceLabel } from "./workbenchStore";
 
 const SIDEBAR_WIDTH_KEY = "uya:sidebar-width:v1";
 
@@ -29,6 +34,149 @@ function loadSidebarWidth(): number {
     // Ignore storage failures.
   }
   return 236;
+}
+
+function VerifyPopoverButton() {
+  const { core, sendVerifyFailureToAgent } = useWorkbench();
+  const { workspace, verifyPresets, activeVerify } = useWorkbenchState(useShallow((state) => ({
+    workspace: state.workspace,
+    verifyPresets: state.verifyPresets,
+    activeVerify: state.activeVerify,
+  })));
+  const [opened, setOpened] = useState(false);
+  const [command, setCommand] = useState("");
+
+  useEffect(() => {
+    if (!command && verifyPresets.length > 0) {
+      setCommand(verifyPresets[0].command);
+    }
+  }, [command, verifyPresets]);
+
+  if (!workspace) return null;
+
+  const status = activeVerify?.status;
+  const color = status === "passed" ? "teal" : status === "failed" ? "red" : status === "running" ? "iris" : "gray";
+  const icon = status === "running"
+    ? <Loader size={11} color="iris" />
+    : status === "passed"
+      ? <CheckCircle size={13} weight="fill" color="var(--positive)" />
+      : status === "failed"
+        ? <XCircle size={13} weight="fill" color="var(--danger)" />
+        : <Play size={12} weight="fill" />;
+  const elapsed = activeVerify?.finishedAt ? activeVerify.finishedAt - activeVerify.startedAt : undefined;
+
+  return (
+    <Popover opened={opened} onChange={setOpened} position="bottom-end" width={400} shadow="md" withinPortal>
+      <Popover.Target>
+        <Button
+          variant={status && status !== "cancelled" ? "light" : "default"}
+          color={color}
+          size="compact-xs"
+          leftSection={icon}
+          onClick={() => setOpened((v) => !v)}
+          aria-label="Verification runner"
+        >
+          {status === "running" ? "Verifying…" : status === "passed" ? "Passed" : status === "failed" ? "Failed" : "Verify"}
+        </Button>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap={8}>
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="xs" fw={650}>Verify workspace</Text>
+            {activeVerify && (
+              <Badge size="xs" variant="light" color={color}>
+                {activeVerify.status}{elapsed ? ` · ${formatDurationCompact(elapsed)}` : ""}
+              </Badge>
+            )}
+          </Group>
+
+          {verifyPresets.length > 0 && (
+            <Group gap={4} wrap="wrap">
+              {verifyPresets.slice(0, 6).map((preset) => (
+                <Button
+                  key={preset.id}
+                  size="compact-xs"
+                  variant={command === preset.command ? "light" : "default"}
+                  color={command === preset.command ? "iris" : "gray"}
+                  onClick={() => {
+                    setCommand(preset.command);
+                    void core.startVerify(preset.command);
+                  }}
+                >
+                  {preset.label}
+                </Button>
+              ))}
+            </Group>
+          )}
+
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (command.trim()) void core.startVerify(command.trim());
+            }}
+          >
+            <Group gap={6} wrap="nowrap">
+              <TextInput
+                size="xs"
+                style={{ flex: 1 }}
+                aria-label="Verification command"
+                placeholder="e.g. bun test, npm run build, cargo check"
+                value={command}
+                onChange={(event) => setCommand(event.currentTarget.value)}
+              />
+              {status === "running" ? (
+                <Button
+                  size="xs"
+                  color="red"
+                  variant="light"
+                  leftSection={<Stop size={12} weight="fill" />}
+                  onClick={() => void core.cancelVerify()}
+                >
+                  Stop
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  size="xs"
+                  color="iris"
+                  disabled={!command.trim()}
+                  leftSection={<Play size={12} weight="fill" />}
+                >
+                  Run
+                </Button>
+              )}
+            </Group>
+          </form>
+
+          {activeVerify && (
+            <>
+              <ScrollArea.Autosize mah={200} type="auto">
+                <pre className="verify-output">
+                  {activeVerify.output || (activeVerify.status === "running" ? "Running…" : "(no output)")}
+                </pre>
+              </ScrollArea.Autosize>
+              {activeVerify.status === "failed" && (
+                <Group justify="flex-end">
+                  <Button
+                    size="compact-xs"
+                    variant="light"
+                    color="iris"
+                    leftSection={<Bug size={12} weight="duotone" />}
+                    onClick={() => {
+                      sendVerifyFailureToAgent();
+                      setOpened(false);
+                    }}
+                  >
+                    Send failure to agent
+                  </Button>
+                </Group>
+              )}
+            </>
+          )}
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
 }
 
 export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
@@ -110,6 +258,7 @@ export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
         {onRestartToUpdate && (
           <Button color="iris" size="compact-xs" onClick={onRestartToUpdate}>Restart to Update</Button>
         )}
+        <VerifyPopoverButton />
         <HintTooltip label="New model split" shortcut={formatShortcut("new-split")}>
           <ActionIcon
             variant="subtle"
@@ -160,6 +309,19 @@ export function ActivityRail() {
             <Files size={18} weight={sidebar === "explorer" ? "duotone" : "regular"} />
           </ActionIcon>
         </Indicator>
+      </HintTooltip>
+      <HintTooltip label="Search workspace" shortcut={formatShortcut("toggle-search")} side="right">
+        <ActionIcon
+          size="lg"
+          variant={sidebar === "search" ? "light" : "subtle"}
+          color={sidebar === "search" ? "iris" : "gray"}
+          className="rail-action"
+          aria-label="Search workspace"
+          aria-pressed={sidebar === "search"}
+          onClick={() => toggleSidebar("search")}
+        >
+          <MagnifyingGlass size={18} weight={sidebar === "search" ? "duotone" : "regular"} />
+        </ActionIcon>
       </HintTooltip>
       <HintTooltip label="Git changes" shortcut={formatShortcut("toggle-git")} side="right">
         <Indicator disabled={gitChangeCount === 0} label={gitChangeCount > 99 ? "99" : gitChangeCount} size={14} offset={3} color="iris" fw={700}>
@@ -255,8 +417,29 @@ function WorkspaceExplorer() {
     selectedContext={contextPaths} onToggleContext={toggleContext} onChooseProject={() => void pickProject()} refreshKey={refreshKey} />;
 }
 
+function WorkspaceSearch() {
+  const { dock, pickProject, attachFile } = useWorkbench();
+  const { root, rpc, seedQuery } = useWorkbenchState(useShallow((state) => ({
+    root: state.workspace?.path ?? null,
+    rpc: state.bridge?.rpc ?? unavailable,
+    seedQuery: state.searchQuerySeed,
+  })));
+  return (
+    <SearchPanel
+      root={root}
+      api={rpc}
+      seedQuery={seedQuery}
+      onOpenMatch={(path, line) => dock.openFile(path, line)}
+      onAttachFiles={(paths) => {
+        for (const path of paths) attachFile(path);
+      }}
+      onChooseProject={() => void pickProject()}
+    />
+  );
+}
+
 function WorkspaceGit() {
-  const { dock, pickProject, attachGitDiff } = useWorkbench();
+  const { store, core, dock, pickProject, attachGitDiff, generateCommitMessage } = useWorkbench();
   const { root, rpc, refreshKey } = useWorkbenchState(useShallow((state) => ({
     root: state.workspace?.path ?? null,
     rpc: state.bridge?.rpc ?? unavailable,
@@ -270,6 +453,11 @@ function WorkspaceGit() {
       onOpenDiff={(path, staged) => dock.openDiff({ mode: "git", path, staged })}
       onAttachDiff={(staged) => void attachGitDiff(staged)}
       onChooseProject={() => void pickProject()}
+      onGenerateCommitMessage={generateCommitMessage}
+      onGitChanged={() => {
+        store.setState((state) => ({ refreshKey: state.refreshKey + 1 }));
+        void core.refreshWorkspaceMetadata(root);
+      }}
     />
   );
 }
@@ -306,14 +494,27 @@ export function WorkbenchSidebar() {
   }, []);
 
   if (!sidebar) return null;
+  const ariaLabel = sidebar === "explorer"
+    ? "Project explorer"
+    : sidebar === "search"
+      ? "Workspace search"
+      : sidebar === "git"
+        ? "Git changes"
+        : "Run history";
   return (
     <aside
       className="sidebar"
       style={{ flexBasis: `${width}px` }}
-      aria-label={sidebar === "explorer" ? "Project explorer" : sidebar === "git" ? "Git changes" : "Run history"}
+      aria-label={ariaLabel}
     >
       <div className="sidebar-inner">
-        {sidebar === "explorer" ? <WorkspaceExplorer /> : sidebar === "git" ? <WorkspaceGit /> : <HistoryPanel />}
+        {sidebar === "explorer"
+          ? <WorkspaceExplorer />
+          : sidebar === "search"
+            ? <WorkspaceSearch />
+            : sidebar === "git"
+              ? <WorkspaceGit />
+              : <HistoryPanel />}
       </div>
       <div
         className="sidebar-resizer"
@@ -331,14 +532,43 @@ export function WorkbenchSidebar() {
 }
 
 export function WorkbenchStatus({ version }: { version?: string }) {
-  const { toggleSidebar } = useWorkbench();
-  const { connected, offline, gitBranch, gitChangeCount, busyRuns } = useWorkbenchState(useShallow((state) => ({
+  const { store, core, toggleSidebar } = useWorkbench();
+  const [branches, setBranches] = useState<GitBranchInfo[]>([]);
+  const [switching, setSwitching] = useState(false);
+  const { bridge, root, connected, offline, gitBranch, gitChangeCount, busyRuns } = useWorkbenchState(useShallow((state) => ({
+    bridge: state.bridge,
+    root: state.workspace?.path ?? null,
     connected: Boolean(state.bridge),
     offline: Boolean(state.connectionError),
     gitBranch: state.gitBranch,
     gitChangeCount: state.gitChangeCount,
     busyRuns: state.history.filter((run) => run.status === "running").length,
   })));
+
+  async function loadBranches() {
+    if (!bridge || !root) return;
+    try {
+      const list = await bridge.rpc("git.branches", { workspacePath: root });
+      setBranches(list);
+    } catch {
+      setBranches([]);
+    }
+  }
+
+  async function checkoutBranch(branch: string) {
+    if (!bridge || !root || switching) return;
+    setSwitching(true);
+    try {
+      await bridge.rpc("git.checkout", { branch, workspacePath: root });
+      store.setState((state) => ({ refreshKey: state.refreshKey + 1 }));
+      await core.refreshWorkspaceMetadata(root);
+    } catch (reason) {
+      core.reportError(errorMessage(reason));
+    } finally {
+      setSwitching(false);
+    }
+  }
+
   return (
     <Group component="footer" className="statusbar" justify="space-between" gap="xs" wrap="nowrap">
       <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
@@ -349,13 +579,34 @@ export function WorkbenchStatus({ version }: { version?: string }) {
           </Text>
         </Group>
         {gitBranch && (
-          <UnstyledButton className="status-branch-btn" onClick={() => toggleSidebar("git")} title="Open Git changes">
-            <Group gap={5} wrap="nowrap">
-              <GitBranch size={12} weight="duotone" />
-              <Text size="11px" lh={1}>{gitBranch}</Text>
-              {gitChangeCount > 0 && <Badge size="xs" variant="light" color="iris" px={5}>{gitChangeCount}</Badge>}
-            </Group>
-          </UnstyledButton>
+          <Menu position="top-start" width={240} onOpen={() => void loadBranches()}>
+            <Menu.Target>
+              <UnstyledButton className="status-branch-btn" title="Switch branch or open Git">
+                <Group gap={5} wrap="nowrap">
+                  <GitBranch size={12} weight="duotone" />
+                  <Text size="11px" lh={1}>{gitBranch}</Text>
+                  {gitChangeCount > 0 && <Badge size="xs" variant="light" color="iris" px={5}>{gitChangeCount}</Badge>}
+                </Group>
+              </UnstyledButton>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Label>Switch branch</Menu.Label>
+              {branches.slice(0, 12).map((branch) => (
+                <Menu.Item
+                  key={branch.name}
+                  disabled={branch.current || switching}
+                  rightSection={branch.current ? <Check size={12} color="var(--accent)" /> : undefined}
+                  onClick={() => void checkoutBranch(branch.name)}
+                >
+                  <Text size="xs" truncate="end">{branch.name}</Text>
+                </Menu.Item>
+              ))}
+              {branches.length > 0 && <Menu.Divider />}
+              <Menu.Item leftSection={<GitBranch size={12} />} onClick={() => toggleSidebar("git")}>
+                Open Git sidebar
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
         )}
       </Group>
 
@@ -376,12 +627,13 @@ export function WorkbenchDialogs() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingRecent, setPendingRecent] = useState<string | undefined>(undefined);
   const [judgeOpen, setJudgeOpen] = useState(false);
-  const { providers, rules, rpc, lastBroadcastRunIds, details } = useWorkbenchState(useShallow((state) => ({
+  const { providers, rules, rpc, lastBroadcastRunIds, details, activeArena } = useWorkbenchState(useShallow((state) => ({
     providers: state.providers,
     rules: state.rules,
     rpc: state.bridge?.rpc,
     lastBroadcastRunIds: state.lastBroadcastRunIds,
     details: state.details,
+    activeArena: state.activeArena,
   })));
 
   const judgeCandidates = lastBroadcastRunIds
@@ -409,6 +661,7 @@ export function WorkbenchDialogs() {
         onClose={() => setJudgeOpen(false)}
         providers={providers}
         candidates={judgeCandidates}
+        arena={activeArena}
         onRunJudge={(options) => void runJudge(options)}
       />
       <Modal

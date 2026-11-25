@@ -41,6 +41,7 @@ const customProvider: Provider = {
   terminal: true, command: "legacy-cli", terminalArgs: ["--synthetic"],
 };
 const rules: RoutingRule[] = [{ providerId: customProvider.id, tag: "synthetic" }];
+const diskTestTimeoutMs = 30_000;
 
 function withFixture(check: (dir: string, filepath: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), "uya-history-migrations-"));
@@ -52,17 +53,20 @@ function withFixture(check: (dir: string, filepath: string) => void) {
 }
 
 function seedLegacy(db: Database) {
-  db.exec(legacySchema);
-  for (const run of [legacyRun, interruptedRun]) {
-    db.run("INSERT INTO runs VALUES (?, ?, ?, ?, ?)", [
-      run.id, run.startedAt, run.status, JSON.stringify({ prompt: run.prompt }), JSON.stringify(run),
+  // Commit the fixture once to avoid a disk sync per schema or seed statement.
+  db.transaction(() => {
+    db.exec(legacySchema);
+    for (const run of [legacyRun, interruptedRun]) {
+      db.run("INSERT INTO runs VALUES (?, ?, ?, ?, ?)", [
+        run.id, run.startedAt, run.status, JSON.stringify({ prompt: run.prompt }), JSON.stringify(run),
+      ]);
+    }
+    db.run("INSERT INTO run_events VALUES (?, ?, ?)", [legacyEvent.runId, legacyEvent.seq, JSON.stringify(legacyEvent)]);
+    db.run("INSERT INTO raw_events VALUES (?, ?, ?)", [legacyRun.id, legacyRun.providerId, "synthetic raw frame"]);
+    db.run("INSERT INTO settings VALUES (?, ?), (?, ?)", [
+      "routingRules", JSON.stringify(rules), "customProviders", JSON.stringify([customProvider]),
     ]);
-  }
-  db.run("INSERT INTO run_events VALUES (?, ?, ?)", [legacyEvent.runId, legacyEvent.seq, JSON.stringify(legacyEvent)]);
-  db.run("INSERT INTO raw_events VALUES (?, ?, ?)", [legacyRun.id, legacyRun.providerId, "synthetic raw frame"]);
-  db.run("INSERT INTO settings VALUES (?, ?), (?, ?)", [
-    "routingRules", JSON.stringify(rules), "customProviders", JSON.stringify([customProvider]),
-  ]);
+  })();
 }
 
 function readVersion(db: Database) {
@@ -101,13 +105,13 @@ test("upgrades v0.1 history, preserves rows and settings, and reopens the same h
       expect(reopened.get(interruptedRun.id)?.events.length).toBe(1);
       expect(reopened.get(legacyRun.id)?.events).toEqual([legacyEvent]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(3);
+      expect(readVersion(db)).toBe(4);
       expect(db.query("SELECT line FROM raw_events").get()).toEqual({ line: "synthetic raw frame" });
     } finally {
       reopened.close();
     }
   });
-});
+}, diskTestTimeoutMs);
 
 test("adopts an unversioned preview that already contains scoped conversation rows", () => {
   withFixture((dir, filepath) => {
@@ -127,7 +131,7 @@ test("adopts an unversioned preview that already contains scoped conversation ro
         { run: legacyRun, events: [legacyEvent] },
       ]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(3);
+      expect(readVersion(db)).toBe(4);
     } finally {
       history.close();
     }
@@ -163,7 +167,7 @@ test("upgrades v0.2.1 history and backfills searchable prompts and ordered text 
       expect(history.list(10, { query: "unsearchable" })).toEqual([]);
       expect(history.conversations(10, { query: "backfill" }).map(({ id }) => id)).toEqual(["legacy-thread"]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(3);
+      expect(readVersion(db)).toBe(4);
       expect(db.query("SELECT run_id, prompt, response FROM run_search ORDER BY run_id").all()).toEqual([
         { run_id: interruptedRun.id, prompt: interruptedRun.prompt, response: "" },
         { run_id: legacyRun.id, prompt: legacyRun.prompt, response: "Synthetic legacy response backfill" },
@@ -190,7 +194,7 @@ test("refuses newer and unsupported versions before changing history or journal 
       expect(db.query("SELECT name FROM sqlite_schema WHERE name = 'conversation_runs'").get()).toBeNull();
     });
   }
-});
+}, diskTestTimeoutMs);
 
 test("rolls back schema changes and the version when a later migration fails", () => {
   withFixture((dir, filepath) => {

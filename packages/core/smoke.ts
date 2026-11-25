@@ -178,7 +178,25 @@ try {
   assert.equal((await rpc("providers.list", {})).some(({ id }) => id === terminal.id), false);
   assert.deepEqual((await rpc("runs.getRules", {})).map(({ providerId }) => providerId), ["codex"]);
   await assert.rejects(rpc("providers.remove", { id: "codex" }), /Custom provider not found/);
-  console.log("Core smoke passed: authentication, scoped conversations, streaming, fallback TTFT, cancellation, persistence, and provider CRUD.");
+
+  // v0.4.0 end-to-end smoke: code search, verify runner, checkpoints & restore, and session close.
+  const searchRes = await rpc("workspace.search", { query: "attached context", glob: "*.ts", workspacePath: project.path });
+  assert.equal(searchRes.totalMatches, 1);
+  assert.equal(searchRes.files[0]?.path, "main.ts");
+
+  const verifyRun = await rpc("verify.start", { command: "echo smoke-verify-ok", workspacePath: project.path });
+  let verified = verifyRun;
+  for (let i = 0; i < 40 && verified.status === "running"; i++) {
+    await Bun.sleep(25);
+    verified = await rpc("verify.get", { id: verifyRun.id });
+  }
+  assert.equal(verified.status, "passed");
+  assert.ok(verified.output.includes("smoke-verify-ok"));
+
+  await rpc("runs.closeSession", { conversationId, workspacePath: project.path });
+  assert.deepEqual(await rpc("checkpoints.list", { workspacePath: project.path }), []);
+
+  console.log("Core smoke passed: authentication, scoped conversations, streaming, fallback TTFT, cancellation, persistence, search, verify, and provider CRUD.");
 } finally {
   await server?.close();
   await rm(fixture, { recursive: true, force: true });

@@ -81,13 +81,30 @@ function PromptsTool() {
 }
 
 function TerminalTool() {
-  const bridge = useWorkbenchState((state) => state.bridge);
-  const root = useWorkbenchState((state) => state.workspace?.path ?? null);
-  return <TerminalPanel key={root} bridge={bridge} cwd={root} title="Shell" autoStart />;
+  const { store } = useWorkbench();
+  const { bridge, root, pendingCommand } = useWorkbenchState(useShallow((state) => ({
+    bridge: state.bridge,
+    root: state.workspace?.path ?? null,
+    pendingCommand: state.pendingTerminalCommand,
+  })));
+  const onConsumedCommand = useCallback(() => {
+    store.setState({ pendingTerminalCommand: null });
+  }, [store]);
+  return (
+    <TerminalPanel
+      key={root}
+      bridge={bridge}
+      cwd={root}
+      title="Shell"
+      autoStart
+      pendingCommand={pendingCommand}
+      onConsumedCommand={onConsumedCommand}
+    />
+  );
 }
 
 function HistoryTool({ id }: { id: string | undefined }) {
-  const { dock, openExternalUrl, previewDiffFromCode, forkConversationToSplit } = useWorkbench();
+  const { dock, openExternalUrl, previewDiffFromCode, forkConversationToSplit, runInTerminal } = useWorkbench();
   const detail = useWorkbenchState((state) => id ? state.details[id] : undefined);
   const providers = useWorkbenchState((state) => state.providers);
   const root = useWorkbenchState((state) => state.workspace?.path ?? null);
@@ -123,6 +140,7 @@ function HistoryTool({ id }: { id: string | undefined }) {
           onOpenUrl={(url) => void openExternalUrl(url)}
           onOpenFile={(path, line) => dock.openFile(path, line)}
           onPreviewDiff={previewDiffFromCode}
+          onRunCommand={runInTerminal}
         />
       </div>
     </div>
@@ -131,12 +149,12 @@ function HistoryTool({ id }: { id: string | undefined }) {
 
 function ChatTool({ id }: { id: string }) {
   const {
-    core, dock, openProviders, sendToPane, setPaneDraft,
+    core, dock, pickProject, openProviders, sendToPane, setPaneDraft, startNewConversation,
     attachFile, attachGitDiff, attachTerminal, forkConversationToSplit,
-    openExternalUrl, previewDiffFromCode,
+    openExternalUrl, previewDiffFromCode, runInTerminal,
   } = useWorkbench();
   const {
-    bridge, root, index, config, provider, providers, draft, promptHistory, busy,
+    bridge, root, recentWorkspaces, index, config, provider, providers, draft, promptHistory, busy,
     choosingProject, contextCount, hasSelection,
   } = useWorkbenchState(useShallow((state) => {
     const panes = state.dock.chatPanes;
@@ -146,6 +164,7 @@ function ChatTool({ id }: { id: string }) {
     return {
       bridge: state.bridge,
       root: state.workspace?.path ?? null,
+      recentWorkspaces: state.recentWorkspaces,
       index: paneIndex,
       config: paneConfig,
       provider: providerForPane(state.providers, paneConfig, paneIndex),
@@ -187,11 +206,15 @@ function ChatTool({ id }: { id: string }) {
       bridge={bridge}
       rpc={bridge?.rpc}
       cwd={root}
+      recentWorkspaces={recentWorkspaces}
+      onPickProject={(recentPath) => void pickProject(false, recentPath)}
       onDraftChange={(value) => setPaneDraft(id, value)}
       onSend={(override) => void sendToPane(id, override)}
       onConfig={(patch) => dock.configure(id, patch)}
       onCancel={core.cancelRun}
-      onNewConversation={() => dock.newConversation(id)}
+      onRespondApproval={core.respondApproval}
+      onRestoreCheckpoint={core.restoreCheckpoint}
+      onNewConversation={() => startNewConversation(id)}
       onOpenProviders={openProviders}
       onRefreshProviders={core.refreshProviders}
       onAttachFile={attachFile}
@@ -203,6 +226,7 @@ function ChatTool({ id }: { id: string }) {
       onOpenUrl={(url) => void openExternalUrl(url)}
       onOpenFile={(path, line) => dock.openFile(path, line)}
       onPreviewDiff={previewDiffFromCode}
+      onRunCommand={runInTerminal}
     />
   );
 }

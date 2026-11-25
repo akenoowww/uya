@@ -13,6 +13,7 @@ import "@xterm/xterm/css/xterm.css";
 export interface TerminalControls {
   start: () => void;
   stop: () => void;
+  sendCommand: (command: string) => void;
 }
 
 export interface TerminalStateSnapshot {
@@ -29,6 +30,8 @@ interface Props {
   title: string;
   embedded?: boolean;
   autoStart?: boolean;
+  pendingCommand?: { command: string; nonce: number } | null;
+  onConsumedCommand?: (nonce: number) => void;
   controlsRef?: RefObject<TerminalControls | null>;
   onStateChange?: (state: TerminalStateSnapshot) => void;
 }
@@ -41,7 +44,8 @@ interface Session {
 }
 
 export function TerminalPanel({
-  bridge, cwd, program, args, title, embedded = false, autoStart = true, controlsRef, onStateChange,
+  bridge, cwd, program, args, title, embedded = false, autoStart = true,
+  pendingCommand, onConsumedCommand, controlsRef, onStateChange,
 }: Props) {
   const viewport = useRef<HTMLDivElement>(null);
   const bufferKey = useId();
@@ -50,8 +54,21 @@ export function TerminalPanel({
   const [hasStarted, setHasStarted] = useState(false);
   const [status, setStatus] = useState("");
   const autoStartedRef = useRef(false);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const activeBridgeRef = useRef<Bridge | null>(null);
+  const queuedCommandRef = useRef<string | null>(null);
 
   const running = Boolean(session && !status);
+
+  function dispatchCommand(command: string) {
+    const payload = `${command.replace(/\r?\n$/u, "")}\n`;
+    if (activeSessionIdRef.current && activeBridgeRef.current) {
+      void activeBridgeRef.current.typeTerminal(activeSessionIdRef.current, payload).catch(() => {});
+    } else {
+      queuedCommandRef.current = payload;
+      if (!session && bridge) startSession();
+    }
+  }
 
   function startSession() {
     if (!bridge) return;
@@ -68,7 +85,14 @@ export function TerminalPanel({
   useImperativeHandle(controlsRef, () => ({
     start: startSession,
     stop: stopSession,
+    sendCommand: dispatchCommand,
   }));
+
+  useEffect(() => {
+    if (!pendingCommand) return;
+    dispatchCommand(pendingCommand.command);
+    onConsumedCommand?.(pendingCommand.nonce);
+  }, [pendingCommand, onConsumedCommand]);
 
   useEffect(() => {
     onStateChange?.({ running, hasStarted, status });
@@ -143,7 +167,18 @@ export function TerminalPanel({
         void activeBridge.closeTerminal(sessionId).catch(() => {});
       } else if (!finished) {
         id = sessionId;
+        activeSessionIdRef.current = sessionId;
+        activeBridgeRef.current = activeBridge;
         void activeBridge.resizeTerminal(id, terminal.cols, terminal.rows).catch(() => {});
+        if (queuedCommandRef.current) {
+          const pending = queuedCommandRef.current;
+          queuedCommandRef.current = null;
+          setTimeout(() => {
+            if (!disposed && activeSessionIdRef.current === sessionId) {
+              void activeBridge.typeTerminal(sessionId, pending).catch(() => {});
+            }
+          }, 150);
+        }
         terminal.focus();
       }
     }).catch((error) => {
@@ -152,6 +187,10 @@ export function TerminalPanel({
 
     return () => {
       disposed = true;
+      if (activeSessionIdRef.current === id) {
+        activeSessionIdRef.current = null;
+        activeBridgeRef.current = null;
+      }
       if (id) void activeBridge.closeTerminal(id).catch(() => {});
       clearTerminalSession(bufferKey);
       observer.disconnect();

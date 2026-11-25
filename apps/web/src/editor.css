@@ -91,6 +91,59 @@
   padding-inline: 8px;
 }
 
+.git-row-wrap {
+  gap: 4px;
+}
+
+.git-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 110ms ease;
+}
+
+.git-row-wrap:hover .git-row-actions,
+.git-row-wrap:focus-within .git-row-actions {
+  opacity: 1;
+}
+
+.git-commit-row {
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.git-commit-row:hover {
+  background: var(--surface);
+}
+
+.search-file-group {
+  margin-bottom: 2px;
+}
+
+.search-match-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 6px;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-match-row:hover {
+  background: var(--surface);
+}
+
+.search-highlight {
+  background: rgba(180, 162, 255, 0.28);
+  color: #f3efff;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 .file-name {
   display: flex;
   align-items: center;

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 430" width="1120" height="430" role="img" aria-label="Uya local-first system architecture">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 1.5L8.5 5L0 8.5z" fill="#7d8294" />
+    </marker>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect width="1120" height="430" rx="14" fill="#131418" stroke="#2f323d" />
+  <text x="28" y="34" class="sans" font-size="13.5" font-weight="700" fill="#eceef4">Uya Local-First Architecture</text>
+  <text x="1092" y="34" text-anchor="end" class="mono" font-size="11" fill="#b4a2ff">Tauri 2 + React 19 + Loopback Bun Sidecar</text>
+  <line x1="28" y1="48" x2="1092" y2="48" stroke="#272933" />
+
+  <!-- Layer 1: Desktop Shell & Frontend -->
+  <rect x="28" y="66" width="500" height="148" rx="10" fill="#191a20" stroke="#b4a2ff" stroke-opacity="0.45" />
+  <text x="44" y="88" class="sans" font-size="12.5" font-weight="700" fill="#b4a2ff">Frontend Workbench (WebView · React 19 + TypeScript)</text>
+  <rect x="44" y="100" width="146" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="54" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">Dockview Splits</text>
+  <text x="54" y="134" class="sans" font-size="10" fill="#9ea2b2">Multi-agent &amp; Broadcast</text>
+  <rect x="198" y="100" width="150" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="208" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">Monaco Editor &amp; Diff</text>
+  <text x="208" y="134" class="sans" font-size="10" fill="#9ea2b2">Multi-file Apply &amp; Arena</text>
+  <rect x="356" y="100" width="156" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="366" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">xterm.js + Tools</text>
+  <text x="366" y="134" class="sans" font-size="10" fill="#9ea2b2">Search · Git · Verify</text>
+  <rect x="44" y="152" width="468" height="46" rx="6" fill="#14151a" stroke="#272933" />
+  <text x="56" y="171" class="sans" font-size="11" font-weight="600" fill="#eceef4">Zustand Store · Run Stream Coalescer · Inline Approval Cards</text>
+  <text x="56" y="187" class="mono" font-size="10" fill="#9ea2b2">WebSocket live deltas (instant flush on approvals) + runs.get fallback</text>
+
+  <!-- Tauri 2 Native Shell -->
+  <rect x="556" y="66" width="536" height="148" rx="10" fill="#191a20" stroke="#7dd1a4" stroke-opacity="0.45" />
+  <text x="572" y="88" class="sans" font-size="12.5" font-weight="700" fill="#7dd1a4">Tauri 2 Native Shell (Rust · macOS 13+ &amp; Windows 10/11)</text>
+  <rect x="572" y="100" width="160" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="582" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">Native PTY / ConPTY</text>
+  <text x="582" y="134" class="sans" font-size="10" fill="#9ea2b2">Interactive TUIs &amp; Shell</text>
+  <rect x="740" y="100" width="162" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="750" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">Picker &amp; FS Watcher</text>
+  <text x="750" y="134" class="sans" font-size="10" fill="#9ea2b2">Approved Recent Folders</text>
+  <rect x="910" y="100" width="166" height="44" rx="6" fill="#21232b" stroke="#2f323d" />
+  <text x="920" y="118" class="sans" font-size="11" font-weight="600" fill="#eceef4">Sidecar Supervisor</text>
+  <text x="920" y="134" class="sans" font-size="10" fill="#9ea2b2">Data Lock &amp; Signed Updates</text>
+  <rect x="572" y="152" width="504" height="46" rx="6" fill="#14151a" stroke="#272933" />
+  <text x="584" y="171" class="sans" font-size="11" font-weight="600" fill="#eceef4">IPC Bridge (Per-Session Random Bearer Token + Ephemeral Port)</text>
+  <text x="584" y="187" class="mono" font-size="10" fill="#9ea2b2">Strict 127.0.0.1 loopback · Origin validation · Zero proxy bypass</text>
+
+  <!-- Vertical Connectors -->
+  <line x1="278" y1="214" x2="278" y2="254" stroke="#7d8294" stroke-width="1.5" marker-end="url(#arr)" />
+  <line x1="824" y1="214" x2="824" y2="254" stroke="#7d8294" stroke-width="1.5" marker-end="url(#arr)" />
+  <rect x="148" y="222" width="260" height="22" rx="5" fill="#17181d" stroke="#2f323d" />
+  <text x="278" y="237" text-anchor="middle" class="mono" font-size="10" fill="#b4a2ff">JSON-RPC 2.0 + WS /events (Bearer)</text>
+  <rect x="720" y="222" width="208" height="22" rx="5" fill="#17181d" stroke="#2f323d" />
+  <text x="824" y="237" text-anchor="middle" class="mono" font-size="10" fill="#7dd1a4">Spawns &amp; monitors uya-core</text>
+
+  <!-- Layer 2: Bun Sidecar uya-core -->
+  <rect x="28" y="260" width="1064" height="148" rx="10" fill="#191a20" stroke="#2f323d" />
+  <text x="44" y="282" class="sans" font-size="12.5" font-weight="700" fill="#eceef4">uya-core Compiled Bun Sidecar (packages/core · Zod-Validated RPC)</text>
+
+  <!-- Core Modules Row -->
+  <rect x="44" y="296" width="196" height="96" rx="7" fill="#14151a" stroke="#2f323d" />
+  <text x="56" y="315" class="sans" font-size="11.5" font-weight="650" fill="#b4a2ff">Session Pool &amp; CLIs</text>
+  <text x="56" y="333" class="sans" font-size="10.5" fill="#9ea2b2">• Persistent ACP pool</text>
+  <text x="56" y="349" class="sans" font-size="10.5" fill="#9ea2b2">• Native CLI resume</text>
+  <text x="56" y="365" class="sans" font-size="10.5" fill="#9ea2b2">• Isolated/Explore/Agent</text>
+  <text x="56" y="381" class="sans" font-size="10.5" fill="#9ea2b2">• Approval promise queue</text>
+
+  <rect x="252" y="296" width="196" height="96" rx="7" fill="#14151a" stroke="#2f323d" />
+  <text x="264" y="315" class="sans" font-size="11.5" font-weight="650" fill="#7dd1a4">Worktree Arena</text>
+  <text x="264" y="333" class="sans" font-size="10.5" fill="#9ea2b2">• Isolated git worktrees</text>
+  <text x="264" y="349" class="sans" font-size="10.5" fill="#9ea2b2">• Dirty WIP seeding</text>
+  <text x="264" y="365" class="sans" font-size="10.5" fill="#9ea2b2">• Per-slot diff &amp; stats</text>
+  <text x="264" y="381" class="sans" font-size="10.5" fill="#9ea2b2">• Atomic apply + rollback</text>
+
+  <rect x="460" y="296" width="196" height="96" rx="7" fill="#14151a" stroke="#2f323d" />
+  <text x="472" y="315" class="sans" font-size="11.5" font-weight="650" fill="#eceef4">Workspace &amp; Search</text>
+  <text x="472" y="333" class="sans" font-size="10.5" fill="#9ea2b2">• Ripgrep + TS fallback</text>
+  <text x="472" y="349" class="sans" font-size="10.5" fill="#9ea2b2">• Protected-path guard</text>
+  <text x="472" y="365" class="sans" font-size="10.5" fill="#9ea2b2">• Compact @workspace-map</text>
+  <text x="472" y="381" class="sans" font-size="10.5" fill="#9ea2b2">• Revision-safe saves</text>
+
+  <rect x="668" y="296" width="196" height="96" rx="7" fill="#14151a" stroke="#2f323d" />
+  <text x="680" y="315" class="sans" font-size="11.5" font-weight="650" fill="#e5c07b">Git, Verify &amp; Undo</text>
+  <text x="680" y="333" class="sans" font-size="10.5" fill="#9ea2b2">• Hardened Git client</text>
+  <text x="680" y="349" class="sans" font-size="10.5" fill="#9ea2b2">• Async Verify runner</text>
+  <text x="680" y="365" class="sans" font-size="10.5" fill="#9ea2b2">• Pre-run checkpoints</text>
+  <text x="680" y="381" class="sans" font-size="10.5" fill="#9ea2b2">• Secret env stripping</text>
+
+  <rect x="876" y="296" width="200" height="96" rx="7" fill="#14151a" stroke="#2f323d" />
+  <text x="888" y="315" class="sans" font-size="11.5" font-weight="650" fill="#eceef4">SQLite v4 + Runtimes</text>
+  <text x="888" y="333" class="sans" font-size="10.5" fill="#9ea2b2">• WAL + FTS5 history</text>
+  <text x="888" y="349" class="sans" font-size="10.5" fill="#9ea2b2">• Cache &amp; cost analytics</text>
+  <text x="888" y="365" class="sans" font-size="10.5" fill="#9ea2b2">• Ollama / llama.cpp</text>
+  <text x="888" y="381" class="sans" font-size="10.5" fill="#9ea2b2">• MLX / LM Studio</text>
+</svg>

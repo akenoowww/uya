@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyUnifiedDiff, extractTargetPath, isUnifiedDiff } from "./patchApply";
+import { applyUnifiedDiff, extractTargetPath, isShellLanguage, isUnifiedDiff, parseMultiFileUnifiedDiff } from "./patchApply";
 
 describe("patchApply", () => {
   test("detects unified diff blocks and extracts target file path", () => {
@@ -62,5 +62,37 @@ describe("patchApply", () => {
   test("returns error when hunk context does not match", () => {
     const result = applyUnifiedDiff("const x = 1;\n", "@@ -1,1 +1,1 @@\n-const y = 2;\n+const y = 3;\n");
     expect(result.ok).toBe(false);
+  });
+
+  test("identifies shell code block languages", () => {
+    expect(isShellLanguage("sh")).toBe(true);
+    expect(isShellLanguage("bash")).toBe(true);
+    expect(isShellLanguage("zsh")).toBe(true);
+    expect(isShellLanguage("powershell")).toBe(true);
+    expect(isShellLanguage("typescript")).toBe(false);
+    expect(isShellLanguage(undefined)).toBe(false);
+  });
+
+  test("parses multi-file git unified diff patches", () => {
+    const patch = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1,1 +1,1 @@",
+      "-export const a = 1;",
+      "+export const a = 2;",
+      "diff --git a/src/b.ts b/src/b.ts",
+      "--- /dev/null",
+      "+++ b/src/b.ts",
+      "@@ -0,0 +1,1 @@",
+      "+export const b = 3;",
+    ].join("\n");
+
+    const parsed = parseMultiFileUnifiedDiff(patch);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]?.path).toBe("src/a.ts");
+    expect(parsed[0]?.isNewFile).toBe(false);
+    expect(parsed[1]?.path).toBe("src/b.ts");
+    expect(parsed[1]?.isNewFile).toBe(true);
   });
 });

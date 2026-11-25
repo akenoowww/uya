@@ -177,9 +177,16 @@ export function createDockLayout(store: WorkbenchStore) {
     if (!api || !state.workspace || state.choosingProject) return;
     const id = target.mode === "git"
       ? `diff:git:${target.staged ? "staged" : "work"}:${target.path}`
-      : `diff:apply:${++nextDiff}:${target.path}`;
+      : target.mode === "arena"
+        ? `diff:arena:${target.arenaId ?? ""}:${target.arenaSlotId ?? ""}:${target.path}`
+        : `diff:apply:${++nextDiff}:${target.path}`;
     const existing = api.getPanel(id);
-    const label = `${workspaceLabel(target.path)} (${target.mode === "apply" ? "Apply" : target.staged ? "Staged" : "Diff"})`;
+    const suffix = target.mode === "apply"
+      ? (target.multiFiles && target.multiFiles.length > 1 ? `Apply ${target.multiFiles.length}` : "Apply")
+      : target.mode === "arena"
+        ? (target.arenaLabel ?? "Arena")
+        : target.staged ? "Staged" : "Diff";
+    const label = `${workspaceLabel(target.path)} (${suffix})`;
     if (existing) {
       existing.api.updateParameters({ ...existing.params, diffTarget: target });
       existing.api.setActive();

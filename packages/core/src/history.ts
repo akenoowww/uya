@@ -2,13 +2,18 @@ import { Database } from "bun:sqlite";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import type {
-  ConversationSummary, Provider, ProviderUsageStats, RoutingRule, RunDetail, RunEvent, RunInput, RunSummary, UsageStats,
+  ApprovalDecision, ApprovalRequest, ArenaSummary, CheckpointSummary, ConversationSummary,
+  ExecutionMode, Provider, ProviderUsageStats,
+  RoutingRule, RunDetail, RunEvent, RunInput, RunSummary, ToolMeta, UsageStats,
 } from "@ide/protocol";
 import { migrateHistory } from "./history-migrations";
 import { RpcError } from "./validation";
 
 export type RunEventPayload =
-  | { type: "text" | "thinking" | "tool"; text: string }
+  | { type: "text" | "thinking"; text: string }
+  | { type: "tool"; text: string; meta?: ToolMeta }
+  | { type: "approval_request"; request: ApprovalRequest }
+  | { type: "approval_resolved"; requestId: string; decision: ApprovalDecision }
   | { type: "status"; run: RunSummary };
 
 type StoredValue = { value: string };
@@ -19,12 +24,130 @@ type StoredConversation = StoredValue & {
   first_prompt: string;
   turn_count: number;
 };
-type UsageTotals = Omit<ProviderUsageStats, "providerName" | "avgTtftMs"> & {
+export type StoredCheckpoint = { summary: CheckpointSummary; metadata: string };
+type CheckpointSummaryRow = {
+  id: string;
+  workspace: string;
+  run_id: string | null;
+  created_at: number;
+  restored_at: number | null;
+  label: string;
+  files_count: number;
+};
+type CheckpointRow = CheckpointSummaryRow & { metadata: string };
+type UsageTotals = Omit<ProviderUsageStats, "providerName" | "avgTtftMs" | "cachedInputTokens" | "estimatedCostUsd"> & {
   providerName?: string;
+  cachedInputTokens: number;
+  estimatedCostUsd: number;
   ttftSum: number;
   ttftCount: number;
 };
 const CONVERSATION_TITLE_LIMIT = 80;
+
+type TokenRates = readonly [input: number, cachedInput: number, output: number];
+type ReferenceRates = { fallback: TokenRates; models: readonly (readonly [RegExp, TokenRates])[] };
+
+// Standard text API reference rates in USD per million tokens. Subscriptions,
+// cache storage, and varying region or context tiers are outside this estimate.
+const openAiRates: ReferenceRates = {
+  fallback: [1.25, 0.125, 10],
+  models: [
+    [/^gpt-6\.2-astra(?:-|$)/u, [8, 0.4, 40]],
+    [/^gpt-6-astra(?:-|$)/u, [10, 1, 50]],
+    [/^gpt-6\.[12]-sol(?:-|$)/u, [2, 0.1, 10]],
+    [/^gpt-6-sol(?:-|$)/u, [2, 0.2, 10]],
+    [/^gpt-5\.(?:5|6(?:-sol)?)(?:-\d{4}-\d{2}-\d{2})?$/u, [5, 0.5, 30]],
+    [/^gpt-5(?:\.1-codex)?-mini(?:-|$)/u, [0.25, 0.025, 2]],
+    [/^gpt-5-nano(?:-|$)/u, [0.05, 0.005, 0.4]],
+    [/^gpt-5\.2(?:-|$)/u, [1.75, 0.175, 14]],
+    [/^gpt-5\.4-mini(?:-|$)/u, [0.75, 0.075, 4.5]],
+    [/^gpt-5\.4(?:-|$)/u, [2.5, 0.25, 15]],
+    [/^gpt-4\.1-mini(?:-|$)/u, [0.4, 0.1, 1.6]],
+    [/^gpt-4\.1(?:-|$)/u, [2, 0.5, 8]],
+  ],
+};
+const claudeRates: ReferenceRates = {
+  fallback: [3, 0.3, 15],
+  models: [
+    [/\bopus-4(?:-1)?(?:-\d{8})?$/u, [15, 1.5, 75]],
+    [/\bopus\b/u, [5, 0.5, 25]],
+    [/\bhaiku\b/u, [1, 0.1, 5]],
+  ],
+};
+const geminiRates: ReferenceRates = {
+  fallback: [0.3, 0.03, 2.5],
+  models: [
+    [/^gemini-2\.5-pro(?:-|$)/u, [1.25, 0.125, 10]],
+    [/^gemini-3(?:\.\d+)?-pro(?:-|$)/u, [2, 0.2, 12]],
+    [/\bflash-lite\b/u, [0.1, 0.01, 0.4]],
+    [/^gemini-3\.8-flash(?:-|$)/u, [1.5, 0.15, 7.5]],
+    [/^gemini-3\.5-flash(?:-|$)/u, [1.5, 0.15, 9]],
+    [/^gemini-3(?:\.\d+)?-flash(?:-|$)/u, [0.5, 0.05, 3]],
+  ],
+};
+const qwenRates: ReferenceRates = {
+  fallback: [0.4, 0.08, 1.2],
+  models: [
+    [/^qwen3-coder-flash(?:-|$)/u, [0.144, 0.0288, 0.574]],
+    [/^qwen3-coder-plus(?:-|$)/u, [1, 0.2, 5]],
+  ],
+};
+const providerRates = new Map<string, ReferenceRates>([
+  ["codex", openAiRates], ["openai", openAiRates],
+  ["claude", claudeRates], ["anthropic", claudeRates],
+  ["gemini", geminiRates], ["gemini-api", geminiRates], ["google", geminiRates], ["antigravity", geminiRates],
+  ["qwen", qwenRates],
+]);
+
+function validTokenCount(count: number | undefined): number | undefined {
+  return count !== undefined && Number.isFinite(count) && count >= 0 ? count : undefined;
+}
+
+export function estimateRunCostUsd(
+  providerId: string, model: string | undefined, inputTokens?: number, cachedInputTokens?: number, outputTokens?: number,
+): number | undefined {
+  const id = providerId.toLowerCase();
+  const modelId = model?.trim().toLowerCase().split("/").at(-1)?.replace(/[ _]+/gu, "-") ?? "";
+  const reference = id === "antigravity" && modelId.includes("claude") ? claudeRates : providerRates.get(id);
+  if (!reference) return undefined;
+  const input = validTokenCount(inputTokens);
+  const cached = validTokenCount(cachedInputTokens);
+  const output = validTokenCount(outputTokens);
+  if (input === undefined && cached === undefined && output === undefined) return undefined;
+
+  const [inputRate, cachedRate, outputRate] = reference.models.find(([pattern]) => pattern.test(modelId))?.[1]
+    ?? reference.fallback;
+  // Claude reports uncached input and cache reads as separate counters.
+  const separateCache = id === "claude" || id === "anthropic";
+  const totalInput = input ?? cached ?? 0;
+  const cacheHit = separateCache ? cached ?? 0 : Math.min(totalInput, cached ?? 0);
+  const uncachedInput = separateCache ? input ?? 0 : totalInput - cacheHit;
+  return (uncachedInput * inputRate + cacheHit * cachedRate + (output ?? 0) * outputRate) / 1_000_000;
+}
+
+function checkpointSummary(row: CheckpointSummaryRow): CheckpointSummary {
+  return {
+    id: row.id, workspacePath: row.workspace, createdAt: row.created_at, label: row.label, filesCount: row.files_count,
+    ...(row.run_id === null ? {} : { runId: row.run_id }),
+    ...(row.restored_at === null ? {} : { restoredAt: row.restored_at }),
+  };
+}
+
+function storedCheckpoint(row: CheckpointRow): StoredCheckpoint {
+  return { summary: checkpointSummary(row), metadata: row.metadata };
+}
+
+function usageSummary({
+  providerName, ttftSum, ttftCount, cachedInputTokens, estimatedCostUsd, ...stats
+}: UsageTotals): ProviderUsageStats {
+  const cost = Number(estimatedCostUsd.toFixed(4));
+  return {
+    ...stats, providerName: providerName ?? stats.providerId,
+    ...(ttftCount > 0 ? { avgTtftMs: Math.round(ttftSum / ttftCount) } : {}),
+    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+    ...(cost > 0 ? { estimatedCostUsd: cost } : {}),
+  };
+}
 
 function runSearch(query: string | undefined) {
   const search = query?.trim();
@@ -252,8 +375,100 @@ export class History {
       const rows = this.db.query<{ run_id: string }, [string, string]>(
         "SELECT run_id FROM conversation_runs WHERE workspace = ? AND conversation_id = ?",
       ).all(workspace ?? "", id);
+      this.clearProviderSessions(workspace, id);
       return rows.length > 0 && this.deleteRuns(rows.map(({ run_id }) => run_id));
     }).immediate();
+  }
+
+  getProviderSession(
+    workspace: string | undefined, conversationId: string, providerId: string, accessMode: ExecutionMode,
+  ): string | undefined {
+    return this.db.query<{ session_id: string }, [string, string, string, ExecutionMode]>(`
+      SELECT session_id FROM provider_sessions
+      WHERE workspace = ? AND conversation_id = ? AND provider_id = ? AND access_mode = ?
+    `).get(workspace ?? "", conversationId, providerId, accessMode)?.session_id;
+  }
+
+  saveProviderSession(
+    workspace: string | undefined, conversationId: string, providerId: string, accessMode: ExecutionMode, sessionId: string,
+  ): void {
+    this.db.run(`
+      INSERT INTO provider_sessions (workspace, conversation_id, provider_id, access_mode, session_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (workspace, conversation_id, provider_id, access_mode) DO UPDATE SET
+        session_id = excluded.session_id, updated_at = excluded.updated_at
+    `, [workspace ?? "", conversationId, providerId, accessMode, sessionId, Date.now()]);
+  }
+
+  clearProviderSessions(workspace: string | undefined, conversationId: string): void {
+    this.db.run("DELETE FROM provider_sessions WHERE workspace = ? AND conversation_id = ?", [
+      workspace ?? "", conversationId,
+    ]);
+  }
+
+  saveCheckpoint({ summary, metadata }: StoredCheckpoint): void {
+    this.db.run(`
+      INSERT INTO checkpoints (id, workspace, run_id, created_at, restored_at, label, files_count, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET workspace = excluded.workspace, run_id = excluded.run_id,
+        created_at = excluded.created_at, restored_at = excluded.restored_at, label = excluded.label,
+        files_count = excluded.files_count, metadata = excluded.metadata
+    `, [
+      summary.id, summary.workspacePath, summary.runId ?? null, summary.createdAt, summary.restoredAt ?? null,
+      summary.label, summary.filesCount, metadata,
+    ]);
+  }
+
+  getCheckpoint(id: string): StoredCheckpoint | undefined {
+    const row = this.db.query<CheckpointRow, [string]>("SELECT * FROM checkpoints WHERE id = ?").get(id);
+    return row ? storedCheckpoint(row) : undefined;
+  }
+
+  listCheckpoints(workspace: string, limit = 20): CheckpointSummary[] {
+    return this.db.query<CheckpointSummaryRow, [string, number]>(`
+      SELECT id, workspace, run_id, created_at, restored_at, label, files_count FROM checkpoints
+      WHERE workspace = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+    `).all(workspace, limit).map(checkpointSummary);
+  }
+
+  markCheckpointRestored(id: string, restoredAt: number): void {
+    this.db.run("UPDATE checkpoints SET restored_at = ? WHERE id = ?", [restoredAt, id]);
+  }
+
+  deleteOldCheckpoints(workspace: string, keep: number): StoredCheckpoint[] {
+    if (!Number.isSafeInteger(keep) || keep < 0) throw new RangeError("Keep must be a nonnegative integer.");
+    return this.db.transaction(() => {
+      const rows = this.db.query<CheckpointRow, [string, number]>(`
+        SELECT * FROM checkpoints WHERE workspace = ? ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+      `).all(workspace, keep);
+      if (rows.length > 0) {
+        this.db.run("DELETE FROM checkpoints WHERE id IN (SELECT value FROM json_each(?))", [
+          JSON.stringify(rows.map(({ id }) => id)),
+        ]);
+      }
+      return rows.map(storedCheckpoint);
+    }).immediate();
+  }
+
+  saveArena(arena: ArenaSummary): void {
+    this.db.run(`
+      INSERT INTO arenas (id, workspace, created_at, status, value) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET workspace = excluded.workspace, created_at = excluded.created_at,
+        status = excluded.status, value = excluded.value
+    `, [arena.id, arena.workspacePath, arena.createdAt, arena.status, JSON.stringify(arena)]);
+  }
+
+  getArena(id: string): ArenaSummary | undefined {
+    const row = this.db.query<StoredValue, [string]>("SELECT value FROM arenas WHERE id = ?").get(id);
+    return row ? JSON.parse(row.value) as ArenaSummary : undefined;
+  }
+
+  listArenas(workspacePath?: string, limit = 20): ArenaSummary[] {
+    return this.db.query<StoredValue, (string | number)[]>(`
+      SELECT value FROM arenas ${workspacePath === undefined ? "" : "WHERE workspace = ?"}
+      ORDER BY created_at DESC, rowid DESC LIMIT ?
+    `).all(...(workspacePath === undefined ? [] : [workspacePath]), limit)
+      .map(({ value }) => JSON.parse(value) as ArenaSummary);
   }
 
   usage(days = 30): UsageStats {
@@ -268,7 +483,8 @@ export class History {
       if (!totals) {
         totals = {
           providerId: run.providerId, runs: 0, succeeded: 0, failed: 0,
-          inputTokens: 0, outputTokens: 0, ttftSum: 0, ttftCount: 0, efforts: {},
+          inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, estimatedCostUsd: 0,
+          ttftSum: 0, ttftCount: 0, efforts: {},
         };
         providers.set(run.providerId, totals);
       }
@@ -282,14 +498,14 @@ export class History {
         totals.ttftCount += 1;
       }
       totals.inputTokens += run.inputTokens ?? 0;
+      totals.cachedInputTokens += run.cachedInputTokens ?? 0;
       totals.outputTokens += run.outputTokens ?? 0;
+      totals.estimatedCostUsd += run.estimatedCostUsd ?? estimateRunCostUsd(
+        run.providerId, run.model, run.inputTokens, run.cachedInputTokens, run.outputTokens,
+      ) ?? 0;
       if (run.effort) totals.efforts[run.effort] = (totals.efforts[run.effort] ?? 0) + 1;
     }
-    const byProvider = [...providers.values()].sort((a, b) => b.runs - a.runs)
-      .map(({ providerName, ttftSum, ttftCount, ...stats }) => ({
-        ...stats, providerName: providerName ?? stats.providerId,
-        ...(ttftCount > 0 ? { avgTtftMs: Math.round(ttftSum / ttftCount) } : {}),
-      }));
+    const byProvider = [...providers.values()].sort((a, b) => b.runs - a.runs).map(usageSummary);
     return { days, totalRuns, byProvider };
   }
 

@@ -1,11 +1,15 @@
 import { expect, test } from "bun:test";
 import type { Provider, RunDetail } from "@ide/protocol";
+import { parseAccessModeArg } from "./components/AccessModePicker";
 import { parseEffortArg, resolveSupportedEfforts } from "./components/EffortPicker";
 import { buildJudgePrompt, extractRunReplyText } from "./components/JudgeModal";
 import { extractMentionQuery } from "./components/MentionMenu";
 import { matchSlashSuggestions, parseSlashInvocation } from "./slashCommands";
 import { clearTerminalSession, readLatestTerminalOutput, recordTerminalOutput, stripAnsi } from "./terminalBuffer";
-import { estimateContextBudget, paneDisplayTitle, resolveModel, routingTargets } from "./workbenchStore";
+import {
+  estimateContextBudget, formatDurationCompact, paneDisplayTitle, resolveAccessMode,
+  resolveModel, routingTargets,
+} from "./workbenchStore";
 import type { DockSnapshot } from "./workbenchStore";
 
 const codex: Provider = {
@@ -58,7 +62,7 @@ test("routingTargets remembers lastChatPaneId and respects broadcast target subs
 });
 
 test("slash command matching and parsing handles aliases and arguments", () => {
-  expect(matchSlashSuggestions("/mo").map((c) => c.name)).toEqual(["model"]);
+  expect(matchSlashSuggestions("/mo").map((c) => c.name)).toEqual(["mode", "model"]);
   expect(parseSlashInvocation("/clear")).toEqual({
     command: expect.objectContaining({ name: "new" }),
     arg: "",
@@ -164,4 +168,46 @@ test("terminalBuffer strips ANSI escape codes and tracks latest session output",
   expect(snap?.title).toBe("Shell");
   expect(snap?.text).toBe("PASS line 1\nline 2");
   clearTerminalSession("term-test-1");
+});
+
+test("resolveAccessMode defaults workspace panes to read-only when supported and falls back to isolated", () => {
+  const agentProvider: Provider = { ...codex, supportedModes: ["isolated", "read-only", "agent"] };
+  const chatOnlyProvider: Provider = { ...ollama, supportedModes: ["isolated"] };
+
+  expect(resolveAccessMode(agentProvider, undefined, true)).toBe("read-only");
+  expect(resolveAccessMode(agentProvider, "agent", true)).toBe("agent");
+  expect(resolveAccessMode(agentProvider, "agent", false)).toBe("isolated");
+  expect(resolveAccessMode(chatOnlyProvider, "agent", true)).toBe("isolated");
+  expect(parseAccessModeArg("explore")).toBe("read-only");
+  expect(parseAccessModeArg("agent")).toBe("agent");
+  expect(parseAccessModeArg("chat")).toBe("isolated");
+  expect(parseAccessModeArg("invalid")).toBeUndefined();
+});
+
+test("formatDurationCompact formats sub-second ms and multi-second durations cleanly", () => {
+  expect(formatDurationCompact(420)).toBe("420 ms");
+  expect(formatDurationCompact(6686)).toBe("6.7 s");
+});
+
+test("v0.4.0 slash commands parse cleanly", () => {
+  expect(parseSlashInvocation("/mode agent")).toEqual({
+    command: expect.objectContaining({ name: "mode" }),
+    arg: "agent",
+  });
+  expect(parseSlashInvocation("/arena on")).toEqual({
+    command: expect.objectContaining({ name: "arena" }),
+    arg: "on",
+  });
+  expect(parseSlashInvocation("/search worktree")).toEqual({
+    command: expect.objectContaining({ name: "search" }),
+    arg: "worktree",
+  });
+  expect(parseSlashInvocation("/verify bun test")).toEqual({
+    command: expect.objectContaining({ name: "verify" }),
+    arg: "bun test",
+  });
+  expect(parseSlashInvocation("/undo")).toEqual({
+    command: expect.objectContaining({ name: "undo" }),
+    arg: "",
+  });
 });

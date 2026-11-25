@@ -30,6 +30,14 @@ export class Providers {
     return this.registry.run(request);
   }
 
+  closeSession(conversationKey: string): Promise<void> {
+    return this.registry.closeSession(conversationKey);
+  }
+
+  shutdown(): Promise<void> {
+    return this.registry.shutdown();
+  }
+
   add(input: CustomProviderInput): Provider {
     return this.save(`custom-${crypto.randomUUID()}`, input);
   }

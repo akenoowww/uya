@@ -1,23 +1,18 @@
-import type { EffortLevel } from "@ide/protocol";
+import type { ApprovalDecision, ApprovalOption, EffortLevel, ToolKind, ToolMeta, ToolStatus } from "@ide/protocol";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { version as clientVersion } from "../package.json";
 import { cliEnv, spawnTarget } from "./agents";
 import { classifyCliDiagnostic, drainCliDiagnostics } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { promptForCli } from "./conversation";
-import { AdapterError, normalizeEffortLevel, type AdapterRequest, type Usage } from "./provider-adapter";
+import {
+  AdapterError, normalizeEffortLevel, normalizeExecutionMode, type AdapterApprovalPrompt, type AdapterRequest, type Usage,
+} from "./provider-adapter";
+import { AcpSessionPool, type AcpOptionMeta, type AcpSession } from "./session-pool";
 
 type JsonObject = Record<string, unknown>;
-
-interface AcpOptionMeta {
-  id: string;
-  category?: string;
-  currentValue?: string;
-  values: string[];
-}
+type RpcId = string | number | null;
 
 export interface AcpRunOptions {
   args: string[];
@@ -25,9 +20,12 @@ export interface AcpRunOptions {
   env?: NodeJS.ProcessEnv;
   encode?: (text: string) => string;
   fallbackError: string;
+  pool?: AcpSessionPool;
 }
 
 const MAX_ACP_LINE_BYTES = 2_000_000;
+const MAX_TOOL_OUTPUT_BYTES = 4 * 1024;
+const cancelledPermission = { outcome: { outcome: "cancelled" } };
 
 function asObject(value: unknown): JsonObject | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -35,27 +33,30 @@ function asObject(value: unknown): JsonObject | undefined {
     : undefined;
 }
 
+function asArray(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function tokenCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function parseOptionValues(value: unknown): string[] {
-  const options = Array.isArray(value) ? value : [];
   const result: string[] = [];
-  for (const item of options) {
-    const group = asObject(item)?.options;
+  for (const item of asArray(value)) {
+    const entry = asObject(item);
+    const group = entry?.options;
     if (Array.isArray(group)) {
       result.push(...parseOptionValues(group));
       continue;
     }
-    const val = typeof item === "string" ? item : asObject(item)?.value ?? asObject(item)?.id;
+    const val = typeof item === "string" ? item : entry?.value ?? entry?.id;
     if (typeof val === "string" && val.length > 0) result.push(val);
   }
   return result;
 }
 
-function parseConfigOptions(value: unknown): AcpOptionMeta[] {
-  if (!Array.isArray(value)) return [];
+function parseConfigOptions(value: readonly unknown[]): AcpOptionMeta[] {
   const result: AcpOptionMeta[] = [];
   for (const raw of value) {
     const entry = asObject(raw);
@@ -102,16 +103,15 @@ function resolveAcpEffortValue(requested: EffortLevel, allowed: readonly string[
 }
 
 function selectPermissionRejection(params: JsonObject | undefined): JsonObject {
-  const options = Array.isArray(params?.options) ? params.options : [];
-  for (const item of options) {
+  for (const item of asArray(params?.options)) {
     const entry = asObject(item);
     const kind = typeof entry?.kind === "string" ? entry.kind : "";
     const optionId = typeof entry?.optionId === "string" ? entry.optionId : undefined;
     if (optionId && (kind === "reject_once" || kind === "reject_always")) {
-      return { outcome: { outcome: "selected", optionId } };
+      return permissionOutcome(optionId);
     }
   }
-  return { outcome: { outcome: "cancelled" } };
+  return cancelledPermission;
 }
 
 function extractErrorText(error: unknown): string | undefined {
@@ -134,406 +134,581 @@ function extractErrorText(error: unknown): string | undefined {
   return parts.length ? parts.join(" ") : undefined;
 }
 
-export async function runAcpCli(request: AdapterRequest, options: AcpRunOptions): Promise<Usage> {
-  const { provider, prompt, messages, signal, output } = request;
-  const executable = options.command ?? provider.command;
-  if (!executable) throw new AdapterError("This provider has no executable for structured runs.");
+function firstText(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && !!value.trim());
+}
 
-  const requestedModel = request.model;
-  if (requestedModel && !isSafeCliModelName(requestedModel)) {
-    throw new AdapterError("Invalid model name.");
+function normalizeToolName(name: string): string {
+  return name.trim().replace(/([a-z\d])([A-Z])/g, "$1_$2").toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+const readTools = new Set(["read", "read_file", "list_dir", "list_directory", "list_files", "view_file"]);
+const searchTools = new Set(["search", "glob", "grep", "find_by_name", "search_files"]);
+
+function namedToolKind(value: string | undefined): ToolKind | undefined {
+  if (!value) return;
+  const name = normalizeToolName(value);
+  if (/^(?:shell|bash|sh|terminal|exec|execute|run|powershell|cmd)(?:\b|_)/.test(name)) return "shell";
+  if (/^(?:edit|apply_patch|patch|replace|str_replace|update_file)(?:\b|_)/.test(name)) return "edit";
+  if (/^(?:write|delete|remove|move|rename|save|create_file|mkdir|rmdir|rm|mv|cp|touch|truncate)(?:\b|_)/.test(name)) {
+    return "write";
   }
-  const requestedEffort = normalizeEffortLevel(request.effort);
+  if (/^(?:fetch|web_fetch|download)(?:\b|_)/.test(name)) return "fetch";
+  if (readTools.has(name)) return "read";
+  if (searchTools.has(name)) return "search";
+}
 
-  const cwd = await mkdtemp(join(tmpdir(), "uya-run-"));
-  const usage: Usage = {};
+function isReadTool(kind: ToolKind): boolean {
+  return kind === "read" || kind === "search";
+}
 
-  try {
-    signal.throwIfAborted();
-    const env = cliEnv(options.env);
-    const group = process.platform !== "win32";
-    const target = spawnTarget(executable, options.args);
-    const child = spawn(target.command, target.args, {
-      cwd,
-      env,
-      detached: group,
-      shell: target.shell,
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
+function unsafeToolHint(value: string | undefined): ToolKind | undefined {
+  const kind = namedToolKind(value);
+  if (kind && !isReadTool(kind)) return kind;
+}
+
+function kindForTool(
+  kinds: (ToolKind | undefined)[], command: string | undefined, input: JsonObject | undefined, reportedKind?: string,
+): ToolKind {
+  if (command || kinds.includes("shell")) return "shell";
+  const mutation = kinds.find((kind) => kind === "edit" || kind === "write");
+  if (mutation) return mutation;
+  if (input?.patch != null || input?.newText != null || input?.new_text != null || input?.new_string != null) return "edit";
+  if (input?.content != null && firstText(input.path, input.filePath, input.file_path)) return "write";
+  if (kinds.includes("fetch")) return "fetch";
+  if (reportedKind === "switch_mode" || reportedKind === "think") return "other";
+  return kinds.find((kind) => kind !== undefined && isReadTool(kind)) ?? "other";
+}
+
+function commandText(value: unknown): string | undefined {
+  if (typeof value === "string") return firstText(value);
+  const args = asArray(value);
+  if (args.length) return args.every((arg) => typeof arg === "string") ? args.join(" ") : JSON.stringify(args);
+  if (asObject(value)) return JSON.stringify(value);
+}
+
+function pathIn(value: unknown): string | undefined {
+  for (const entry of asArray(value)) {
+    const path = firstText(asObject(entry)?.path);
+    if (path) return path;
+  }
+}
+
+function toolOutput(call: JsonObject): string | undefined {
+  const value = call.rawOutput ?? call.output;
+  const raw = asObject(value);
+  const text = firstText(value, raw?.output, raw?.stdout, raw?.text, raw?.stderr)
+    ?? firstText(asArray(call.content).map((item) => {
+      const entry = asObject(item);
+      const block = entry?.type === "content" ? asObject(entry.content) : entry;
+      return block?.type === "text" ? firstText(block.text) : undefined;
+    }).filter(Boolean).join("\n"))
+    ?? (value != null ? JSON.stringify(value) : undefined);
+  if (text === undefined) return;
+  const bytes = Buffer.from(text.slice(0, MAX_TOOL_OUTPUT_BYTES));
+  return new StringDecoder("utf8").write(bytes.subarray(0, MAX_TOOL_OUTPUT_BYTES));
+}
+
+function toolStatus(status: unknown): ToolStatus | undefined {
+  if (status === "completed" || status === "done") return "done";
+  if (status === "failed" || status === "error") return "error";
+  if (status === "pending" || status === "in_progress" || status === "running") return "running";
+}
+
+interface AcpToolCall extends Omit<ToolMeta, "name"> {
+  name?: string;
+  title?: string;
+  detail?: string;
+  reportedKind?: string;
+}
+
+function describeTool(call: JsonObject, id: string | undefined, previous?: AcpToolCall): AcpToolCall {
+  const raw = asObject(call.rawInput);
+  const input = asObject(raw?.arguments) ?? asObject(raw?.input) ?? raw;
+  const name = firstText(call.name, call.toolName, raw?.toolName, raw?.tool_name, raw?.tool, previous?.name);
+  const title = firstText(call.title, previous?.title)?.trim();
+  const reportedKind = firstText(call.kind, previous?.reportedKind);
+  const rawText = firstText(call.rawInput);
+  const command = [
+    call.command, input?.command, input?.cmd, input?.commands, input?.argv, input?.script, raw?.command, raw?.cmd,
+  ].map(commandText).find(Boolean) ?? previous?.command;
+  const kinds = [
+    ...[reportedKind, name, title].map(namedToolKind),
+    ...[firstText(raw?.name), firstText(input?.operation), firstText(input?.action), rawText].map(unsafeToolHint),
+    previous?.kind,
+  ];
+  const kind = kindForTool(kinds, command, input, reportedKind);
+  return {
+    id, name, title, kind, reportedKind,
+    command: command ?? (kind === "shell" ? rawText : undefined),
+    path: firstText(call.path, input?.path, input?.filePath, input?.file_path, input?.file,
+      pathIn(call.locations), pathIn(call.content), previous?.path),
+    detail: firstText(call.detail, call.description, previous?.detail),
+    summary: firstText(call.summary, asObject(call.rawOutput)?.summary, previous?.summary),
+    status: toolStatus(call.status) ?? previous?.status ?? "running",
+    output: toolOutput(call) ?? previous?.output,
+  };
+}
+
+function approvalOptions(params: JsonObject | undefined): ApprovalOption[] {
+  const parsed: ApprovalOption[] = [];
+  for (const item of asArray(params?.options)) {
+    const option = asObject(item);
+    const id = firstText(option?.optionId);
+    if (!id) continue;
+    const kind = option?.kind === "allow_always" ? "allow_session" : option?.kind;
+    if (kind === "allow_once" || kind === "allow_session" || kind === "reject_once" || kind === "reject_always") {
+      parsed.push({ id, kind, label: firstText(option?.name, option?.label) ?? id });
+    }
+  }
+  return parsed;
+}
+
+function permissionOutcome(optionId: string): JsonObject {
+  return { outcome: { outcome: "selected", optionId } };
+}
+
+function updateConfigOptions(session: AcpSession, value: unknown): void {
+  if (!Array.isArray(value)) return;
+  const options = parseConfigOptions(value);
+  session.configOptions = options;
+  const model = findModelOption(options)?.currentValue;
+  if (model && isSafeCliModelName(model)) session.model = model;
+  session.effort = findEffortOption(options)?.currentValue ?? session.effort;
+}
+
+class AcpRpcError extends Error {
+  constructor(readonly detail: unknown) {
+    super("ACP request failed.");
+  }
+}
+
+class AcpConnectionClosed extends Error {}
+
+interface AcpReply {
+  result?: JsonObject;
+  line: string;
+}
+
+interface PendingRpc {
+  id: number;
+  method: string;
+  resolve(reply: AcpReply): void;
+  reject(reason: unknown): void;
+}
+
+class AcpConnection {
+  readonly diagnostic: ReturnType<typeof drainCliDiagnostics>;
+  turn?: AcpTurn;
+  private readonly decoder = new StringDecoder("utf8");
+  private buffer = "";
+  private nextId = 1;
+  private pending?: PendingRpc;
+  private failure?: { reason: unknown };
+
+  constructor(
+    private readonly session: AcpSession,
+    args: readonly string[],
+    private readonly onFailure: () => void,
+  ) {
+    const { child, closed } = session;
+    this.diagnostic = drainCliDiagnostics(child.stderr, args);
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      this.receive(typeof chunk === "string" ? chunk : this.decoder.write(chunk));
     });
-
-    const diagnostic = drainCliDiagnostics(child.stderr, options.args);
-    const close = new Promise<number | null>((resolve) => {
-      child.once("error", () => resolve(null));
-      child.once("close", (code) => resolve(code));
+    child.stdout.once("end", () => {
+      this.receive(this.decoder.end() + "\n");
+      this.fail(new AcpConnectionClosed());
     });
+    void closed.then(() => this.fail(new AcpConnectionClosed()));
+  }
 
-    let sessionId: string | undefined;
-    let finished = false;
-    let rpcFailure: { message?: string; diagnostic?: string } | undefined;
-    let nextId = 1;
-    let initId = 0;
-    let newSessionId = 0;
-    let setModelId = 0;
-    let setEffortId = 0;
-    let promptId = 0;
-    let configOptions: AcpOptionMeta[] = [];
-    let availableModelIds = new Set<string>();
+  request(method: string, params: JsonObject): Promise<AcpReply> {
+    if (this.failure) return Promise.reject(this.failure.reason);
+    if (this.pending) return Promise.reject(new AdapterError("An ACP request is already pending."));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending = { id, method, resolve, reject };
+      this.send({ id, method, params });
+    });
+  }
 
-    const send = (payload: JsonObject) => {
-      if (child.stdin.destroyed || !child.stdin.writable) return;
-      try {
-        child.stdin.write(JSON.stringify(payload) + "\n");
-      } catch {
-        // Stdin closed early.
-      }
-    };
+  respond(id: RpcId, result: JsonObject): void {
+    this.send({ id, result });
+  }
 
-    const terminate = () => {
-      try {
-        if (group && child.pid) {
-          process.kill(-child.pid, "SIGKILL");
-          return;
-        }
-      } catch {
-        // Process group may already have exited.
-      }
-      try {
-        if (process.platform === "win32") child.kill();
-        else child.kill("SIGKILL");
-      } catch {
-        // Ignore already-exited child.
-      }
-    };
+  cancelPrompt(): void {
+    const sessionId = this.session.sessionId;
+    if (sessionId) this.send({ method: "session/cancel", params: { sessionId } });
+  }
 
-    const onAbort = () => {
-      if (sessionId) {
-        send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
-      }
-      terminate();
-    };
+  private send(message: JsonObject): void {
+    if (this.failure) return;
+    const stdin = this.session.child.stdin;
+    try {
+      if (!stdin.writable) throw new AcpConnectionClosed();
+      stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+    } catch {
+      this.fail(new AcpConnectionClosed());
+    }
+  }
 
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    child.stdin.on("error", () => undefined);
+  private fail(reason: unknown): void {
+    if (this.failure) return;
+    this.failure = { reason };
+    this.buffer = "";
+    this.pending?.reject(reason);
+    this.pending = undefined;
+    this.onFailure();
+  }
 
-    const failAndStop = (rawError: unknown) => {
-      const errorText = extractErrorText(rawError);
-      rpcFailure = {
-        message: options.fallbackError,
-        diagnostic: errorText ? classifyCliDiagnostic(errorText, options.args)?.message : undefined,
-      };
-      try {
-        child.stdin.end();
-      } catch {
-        // Ignore.
+  private receive(text: string): void {
+    if (this.failure) return;
+    try {
+      this.buffer += text;
+      let offset = 0;
+      for (let end = this.buffer.indexOf("\n"); end !== -1; end = this.buffer.indexOf("\n", offset)) {
+        const line = this.buffer.slice(offset, end);
+        this.checkLineSize(line);
+        this.handleLine(line.trim());
+        if (this.failure) return;
+        offset = end + 1;
       }
-      terminate();
-    };
+      this.buffer = this.buffer.slice(offset);
+      if (this.buffer.length > MAX_ACP_LINE_BYTES) this.checkLineSize(this.buffer);
+    } catch (error) {
+      this.fail(error);
+    }
+  }
 
-    const sendPrompt = () => {
-      if (!sessionId) {
-        failAndStop("ACP session missing sessionId");
-        return;
-      }
-      const rawPrompt = promptForCli(prompt, messages);
-      const text = options.encode ? options.encode(rawPrompt) : rawPrompt;
-      promptId = nextId++;
-      send({
-        jsonrpc: "2.0",
-        id: promptId,
-        method: "session/prompt",
-        params: {
-          sessionId,
-          prompt: [{ type: "text", text }],
-        },
-      });
-    };
+  private checkLineSize(line: string): void {
+    if (Buffer.byteLength(line) > MAX_ACP_LINE_BYTES) {
+      throw new AdapterError("A CLI event exceeded the output limit.");
+    }
+  }
 
-    const sendEffortOrPrompt = () => {
-      if (!sessionId) {
-        failAndStop("ACP session missing sessionId");
-        return;
-      }
-      if (!requestedEffort) {
-        sendPrompt();
-        return;
-      }
-      const effortOpt = findEffortOption(configOptions);
-      if (!effortOpt) {
-        sendPrompt();
-        return;
-      }
-      const targetValue = resolveAcpEffortValue(requestedEffort, effortOpt.values);
-      if (!targetValue || targetValue === effortOpt.currentValue) {
-        sendPrompt();
-        return;
-      }
-      setEffortId = nextId++;
-      send({
-        jsonrpc: "2.0",
-        id: setEffortId,
-        method: "session/set_config_option",
-        params: {
-          sessionId,
-          configId: effortOpt.id,
-          value: targetValue,
-        },
-      });
-    };
+  private handleLine(line: string): void {
+    if (!line.startsWith("{")) return;
+    let message: JsonObject | undefined;
+    try {
+      message = asObject(JSON.parse(line));
+    } catch {
+      return;
+    }
+    if (!message) return;
+    if (typeof message.method === "string") {
+      this.handleAgentMessage(line, message.method, message.id, asObject(message.params));
+      return;
+    }
+    const pending = this.pending;
+    if (!pending || pending.id !== message.id) return;
+    this.pending = undefined;
+    if (pending.method === "session/prompt") this.turn = undefined;
+    if (message.error) pending.reject(new AcpRpcError(message.error));
+    else pending.resolve({ result: asObject(message.result), line });
+  }
 
-    const sendModelOrEffort = () => {
-      if (!sessionId) {
-        failAndStop("ACP session missing sessionId");
-        return;
-      }
-      if (!requestedModel) {
-        sendEffortOrPrompt();
-        return;
-      }
-      const modelOpt = findModelOption(configOptions);
-      if (modelOpt && (modelOpt.values.includes(requestedModel) || !availableModelIds.has(requestedModel))) {
-        usage.model = requestedModel;
-        if (modelOpt.currentValue === requestedModel) {
-          sendEffortOrPrompt();
-          return;
-        }
-        setModelId = nextId++;
-        send({
-          jsonrpc: "2.0",
-          id: setModelId,
-          method: "session/set_config_option",
-          params: {
-            sessionId,
-            configId: modelOpt.id,
-            value: requestedModel,
-          },
-        });
-        return;
-      }
-      usage.model = requestedModel;
-      setModelId = nextId++;
-      send({
-        jsonrpc: "2.0",
-        id: setModelId,
-        method: "session/set_model",
-        params: {
-          sessionId,
-          modelId: requestedModel,
-        },
-      });
-    };
-
-    const handleNotification = (line: string, method: string, params: JsonObject | undefined) => {
-      if (method !== "session/update") return;
+  private handleAgentMessage(line: string, method: string, id: unknown, params: JsonObject | undefined): void {
+    const matchesSession = params?.sessionId === undefined || params.sessionId === this.session.sessionId;
+    if (id === undefined) {
+      if (!matchesSession || method !== "session/update") return;
       const update = asObject(params?.update);
       if (!update) return;
-      const kind = update.sessionUpdate;
-      if (kind === "agent_message_chunk") {
-        const content = asObject(update.content);
-        if (content?.type === "text" && typeof content.text === "string" && content.text) {
-          output.raw(line);
-          output.emit("text", content.text);
-        }
-      } else if (kind === "agent_thought_chunk") {
-        const content = asObject(update.content);
-        if (content?.type === "text" && typeof content.text === "string" && content.text) {
-          output.raw(line);
-          output.emit("thinking", content.text);
-        }
-      } else if (kind === "tool_call") {
-        const title = typeof update.title === "string" && update.title.trim()
-          ? update.title.trim()
-          : typeof update.kind === "string" && update.kind.trim()
-            ? update.kind.trim().replaceAll("_", " ")
-            : "tool call";
-        output.emit("tool", title);
-      } else if (kind === "config_option_update") {
-        const updated = parseConfigOptions(update.configOptions);
-        if (updated.length) configOptions = updated;
-      }
-    };
-
-    const handleAgentRequest = (id: unknown, method: string, params: JsonObject | undefined) => {
-      if (method === "session/request_permission") {
-        send({ jsonrpc: "2.0", id, result: selectPermissionRejection(params) });
-        return;
-      }
-      send({
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32601, message: "Method not supported in structured mode." },
-      });
-    };
-
-    const handleLine = (line: string) => {
-      if (finished || rpcFailure) return;
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("{")) return;
-      let msg: JsonObject | undefined;
-      try {
-        msg = asObject(JSON.parse(trimmed));
-      } catch {
-        return;
-      }
-      if (!msg) return;
-
-      // Agent -> client notification or request
-      if (typeof msg.method === "string") {
-        const params = asObject(msg.params);
-        if (msg.id !== undefined) {
-          handleAgentRequest(msg.id, msg.method, params);
-        } else {
-          handleNotification(trimmed, msg.method, params);
-        }
-        return;
-      }
-
-      if (msg.id === initId) {
-        if (msg.error) {
-          failAndStop(msg.error);
-          return;
-        }
-        newSessionId = nextId++;
-        send({
-          jsonrpc: "2.0",
-          id: newSessionId,
-          method: "session/new",
-          params: { cwd, mcpServers: [] },
-        });
-      } else if (msg.id === newSessionId) {
-        if (msg.error) {
-          failAndStop(msg.error);
-          return;
-        }
-        const res = asObject(msg.result);
-        sessionId = typeof res?.sessionId === "string" ? res.sessionId : undefined;
-        configOptions = parseConfigOptions(res?.configOptions);
-        const modelsObj = asObject(res?.models);
-        const avail = Array.isArray(modelsObj?.availableModels) ? modelsObj.availableModels : [];
-        availableModelIds = new Set(avail.flatMap((entry) => {
-          const id = typeof entry === "string" ? entry : asObject(entry)?.modelId ?? asObject(entry)?.id;
-          return typeof id === "string" ? [id] : [];
-        }));
-        const initialModel = findModelOption(configOptions)?.currentValue
-          ?? (typeof modelsObj?.currentModelId === "string" ? modelsObj.currentModelId : undefined);
-        if (initialModel && isSafeCliModelName(initialModel)) {
-          usage.model ??= initialModel;
-        }
-        sendModelOrEffort();
-      } else if (msg.id === setModelId) {
-        if (msg.error) {
-          failAndStop(msg.error);
-          return;
-        }
-        const res = asObject(msg.result);
-        const updated = parseConfigOptions(res?.configOptions);
-        if (updated.length) configOptions = updated;
-        sendEffortOrPrompt();
-      } else if (msg.id === setEffortId) {
-        if (msg.error) {
-          failAndStop(msg.error);
-          return;
-        }
-        const res = asObject(msg.result);
-        const updated = parseConfigOptions(res?.configOptions);
-        if (updated.length) configOptions = updated;
-        sendPrompt();
-      } else if (msg.id === promptId) {
-        if (msg.error) {
-          failAndStop(msg.error);
-          return;
-        }
-        const res = asObject(msg.result);
-        const stopReason = typeof res?.stopReason === "string" ? res.stopReason : undefined;
-        if (stopReason === "cancelled" && !signal.aborted) {
-          failAndStop("The run was cancelled by the provider.");
-          return;
-        }
-        const stats = asObject(res?.usage);
-        if (stats) {
-          usage.inputTokens = tokenCount(stats.inputTokens ?? stats.input_tokens);
-          usage.outputTokens = tokenCount(stats.outputTokens ?? stats.output_tokens);
-        }
-        output.raw(trimmed);
-        finished = true;
-        try {
-          child.stdin.end();
-        } catch {
-          // Ignore.
-        }
-      }
-    };
-
-    initId = nextId++;
-    send({
-      jsonrpc: "2.0",
-      id: initId,
-      method: "initialize",
-      params: {
-        protocolVersion: 1,
-        clientCapabilities: {},
-        clientInfo: { name: "uya", version: clientVersion },
-      },
-    });
-
-    try {
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for await (const chunk of child.stdout) {
-        signal.throwIfAborted();
-        buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
-        let offset = 0;
-        for (let next = buffer.indexOf("\n"); next !== -1; next = buffer.indexOf("\n", offset)) {
-          if (next - offset > MAX_ACP_LINE_BYTES) {
-            throw new AdapterError("A CLI event exceeded the output limit.");
-          }
-          handleLine(buffer.slice(offset, next));
-          offset = next + 1;
-          if (finished || rpcFailure) break;
-        }
-        buffer = buffer.slice(offset);
-        if (buffer.length > MAX_ACP_LINE_BYTES) {
-          throw new AdapterError("A CLI event exceeded the output limit.");
-        }
-        if (finished || rpcFailure) break;
-      }
-      if (!finished && !rpcFailure) {
-        buffer += decoder.decode();
-        if (buffer.trim()) handleLine(buffer);
-      }
-
-      if (finished) {
-        // ACP servers stay alive until stdin EOF or termination; give a brief grace window then exit cleanly.
-        let grace: ReturnType<typeof setTimeout> | undefined;
-        const exited = await Promise.race([
-          close.then(() => true),
-          new Promise<boolean>((resolve) => {
-            grace = setTimeout(() => resolve(false), 250);
-            grace.unref?.();
-          }),
-        ]);
-        if (grace) clearTimeout(grace);
-        if (!exited && child.exitCode === null) terminate();
-      }
-
-      const code = await close;
-      signal.throwIfAborted();
-      if (rpcFailure || !finished) {
-        const reason = rpcFailure?.diagnostic ?? (await diagnostic)?.message ?? rpcFailure?.message;
-        const fallback = code === 0
-          ? `${provider.name} did not return a complete structured response.`
-          : options.fallbackError;
-        throw new AdapterError(reason ?? fallback, code ?? undefined);
-      }
-      return usage;
-    } finally {
-      signal.removeEventListener("abort", onAbort);
-      if (child.exitCode === null) terminate();
-      await close;
-      await diagnostic;
+      if (update.sessionUpdate === "config_option_update") updateConfigOptions(this.session, update.configOptions);
+      else this.turn?.update(line, update);
+      return;
     }
+    if (typeof id !== "string" && typeof id !== "number" && id !== null) return;
+    if (method === "session/request_permission") {
+      if (matchesSession && this.session.sessionId && this.turn) this.turn.requestPermission(id, params);
+      else this.respond(id, selectPermissionRejection(params));
+      return;
+    }
+    this.send({ id, error: { code: -32601, message: "Method not supported in structured mode." } });
+  }
+}
+
+interface PendingApproval {
+  complete?: (decision: ApprovalDecision) => void;
+}
+
+function askForApproval(
+  requestApproval: NonNullable<AdapterRequest["requestApproval"]>,
+  prompt: AdapterApprovalPrompt,
+  approval: PendingApproval,
+): void {
+  const complete = (decision: ApprovalDecision) => approval.complete?.(decision);
+  try {
+    void Promise.resolve(requestApproval(prompt)).then(complete, () => complete("reject"));
+  } catch {
+    complete("reject");
+  }
+}
+
+class AcpTurn {
+  private readonly tools = new Map<string, AcpToolCall>();
+  private readonly pendingApprovals = new Map<RpcId, PendingApproval>();
+
+  constructor(
+    private readonly session: AcpSession,
+    private readonly connection: AcpConnection,
+    private readonly request: AdapterRequest,
+  ) {}
+
+  update(line: string, update: JsonObject): void {
+    if (this.request.signal.aborted) return;
+    const kind = update.sessionUpdate;
+    if (kind === "tool_call" || kind === "tool_call_update") {
+      const { title, detail, name, reportedKind, ...meta } = this.rememberTool(update);
+      const text = title ?? name ?? reportedKind?.replaceAll("_", " ") ?? "tool call";
+      this.request.output.emit("tool", text, { ...meta, name: name ?? title ?? meta.kind, summary: meta.summary ?? detail ?? text });
+    } else if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+      const content = asObject(update.content);
+      if (content?.type === "text" && typeof content.text === "string" && content.text) {
+        this.request.output.raw(line);
+        this.request.output.emit(kind === "agent_message_chunk" ? "text" : "thinking", content.text);
+      }
+    }
+  }
+
+  requestPermission(id: RpcId, params: JsonObject | undefined): void {
+    if (this.request.signal.aborted || !this.session.busy) {
+      this.connection.respond(id, cancelledPermission);
+      return;
+    }
+    if (this.session.accessMode === "isolated") {
+      this.reply(id, params);
+      return;
+    }
+    const tool = this.rememberTool(asObject(params?.toolCall) ?? {});
+    const options = approvalOptions(params);
+    const once = options.find((option) => option.kind === "allow_once")?.id;
+    if (isReadTool(tool.kind)) {
+      this.reply(id, params, once);
+      return;
+    }
+    const toolName = tool.name ?? tool.title ?? tool.kind;
+    const grantKey = JSON.stringify([tool.kind, normalizeToolName(toolName)]);
+    const sessionOption = options.find((option) => option.kind === "allow_session")?.id;
+    if (this.session.accessMode === "read-only") this.reply(id, params);
+    else if (this.session.sessionAllowTools.has(grantKey)) this.reply(id, params, once ?? sessionOption);
+    else if (this.request.requestApproval) this.requestInteractivePermission(id, params, tool, options, grantKey);
+    else this.reply(id, params);
+  }
+
+  cancelApprovals(): void {
+    for (const [id, approval] of this.pendingApprovals) {
+      approval.complete = undefined;
+      this.connection.respond(id, cancelledPermission);
+    }
+    this.pendingApprovals.clear();
+  }
+
+  private rememberTool(update: JsonObject): AcpToolCall {
+    const id = firstText(update.toolCallId, update.id);
+    const tool = describeTool(update, id, id ? this.tools.get(id) : undefined);
+    if (id) this.tools.set(id, tool);
+    return tool;
+  }
+
+  private reply(id: RpcId, params: JsonObject | undefined, optionId?: string): void {
+    this.connection.respond(id, optionId ? permissionOutcome(optionId) : selectPermissionRejection(params));
+  }
+
+  private requestInteractivePermission(
+    id: RpcId,
+    params: JsonObject | undefined,
+    tool: AcpToolCall,
+    options: ApprovalOption[],
+    grantKey: string,
+  ): void {
+    const requestApproval = this.request.requestApproval;
+    if (!requestApproval || this.pendingApprovals.has(id)) return;
+    const approval: PendingApproval = {};
+    approval.complete = (decision) => {
+      approval.complete = undefined;
+      this.pendingApprovals.delete(id);
+      if (!this.session.busy) return;
+      const selected = decision === "allow_once" || decision === "allow_session"
+        ? options.find((option) => option.kind === decision)?.id
+        : undefined;
+      if (selected && decision === "allow_session" && (tool.name || tool.title || tool.kind !== "other")) {
+        this.session.sessionAllowTools.add(grantKey);
+      }
+      this.reply(id, params, selected);
+    };
+    this.pendingApprovals.set(id, approval);
+    const toolName = tool.name ?? tool.title ?? tool.kind;
+    askForApproval(requestApproval, {
+      toolName, toolKind: tool.kind, title: tool.title ?? toolName, path: tool.path, command: tool.command,
+      detail: tool.detail ?? tool.summary ?? firstText(params?.detail),
+      options,
+    }, approval);
+  }
+}
+
+async function initializeSession(session: AcpSession, connection: AcpConnection): Promise<string> {
+  await connection.request("initialize", {
+    protocolVersion: 1,
+    clientCapabilities: {},
+    clientInfo: { name: "uya", version: clientVersion },
+  });
+  const { result } = await connection.request("session/new", { cwd: session.cwd, mcpServers: [] });
+  const sessionId = firstText(result?.sessionId);
+  if (!sessionId) throw new AcpRpcError("ACP session missing sessionId.");
+  session.sessionId = sessionId;
+  const models = asObject(result?.models);
+  session.availableModelIds = new Set(asArray(models?.availableModels).flatMap((entry) => {
+    const model = asObject(entry);
+    const id = firstText(entry, model?.modelId, model?.id);
+    return id ? [id] : [];
+  }));
+  const currentModel = firstText(models?.currentModelId);
+  if (currentModel && isSafeCliModelName(currentModel)) session.model = currentModel;
+  updateConfigOptions(session, result?.configOptions);
+  return sessionId;
+}
+
+async function configureModel(
+  session: AcpSession, connection: AcpConnection, sessionId: string, model: string | undefined,
+): Promise<void> {
+  if (!model || model === session.model) return;
+  const option = findModelOption(session.configOptions);
+  const useConfig = option && (option.values.includes(model) || !session.availableModelIds.has(model));
+  const { result } = useConfig
+    ? await connection.request("session/set_config_option", { sessionId, configId: option.id, value: model })
+    : await connection.request("session/set_model", { sessionId, modelId: model });
+  session.model = model;
+  if (useConfig) option.currentValue = model;
+  updateConfigOptions(session, result?.configOptions);
+}
+
+async function configureEffort(
+  session: AcpSession, connection: AcpConnection, sessionId: string, effort: EffortLevel | undefined,
+): Promise<void> {
+  const option = effort && findEffortOption(session.configOptions);
+  if (!option) return;
+  const value = resolveAcpEffortValue(effort, option.values);
+  if (!value || value === session.effort) return;
+  const { result } = await connection.request("session/set_config_option", { sessionId, configId: option.id, value });
+  session.effort = value;
+  option.currentValue = value;
+  updateConfigOptions(session, result?.configOptions);
+}
+
+function readUsage(session: AcpSession, result: JsonObject | undefined): Usage {
+  const usage: Usage = { providerSessionId: session.sessionId };
+  if (session.model) usage.model = session.model;
+  const stats = asObject(result?.usage);
+  if (stats) {
+    usage.inputTokens = tokenCount(stats.inputTokens ?? stats.input_tokens);
+    const cached = tokenCount(stats.cachedInputTokens ?? stats.cached_input_tokens ?? stats.cacheReadInputTokens);
+    if (cached !== undefined) usage.cachedInputTokens = cached;
+    usage.outputTokens = tokenCount(stats.outputTokens ?? stats.output_tokens);
+  }
+  return usage;
+}
+
+async function promptSession(
+  session: AcpSession, connection: AcpConnection, request: AdapterRequest, encode?: AcpRunOptions["encode"],
+): Promise<Usage> {
+  const priorSessionId = session.sessionId;
+  const sessionId = priorSessionId ?? await initializeSession(session, connection);
+  await configureModel(session, connection, sessionId, request.model);
+  await configureEffort(session, connection, sessionId, normalizeEffortLevel(request.effort));
+  request.signal.throwIfAborted();
+  const prompt = priorSessionId ? request.prompt : promptForCli(request.prompt, request.messages);
+  const reply = await connection.request("session/prompt", {
+    sessionId,
+    prompt: [{ type: "text", text: encode ? encode(prompt) : prompt }],
+  });
+  request.signal.throwIfAborted();
+  if (reply.result?.stopReason === "cancelled") throw new AcpRpcError("The run was cancelled by the provider.");
+  request.output.raw(reply.line);
+  return readUsage(session, reply.result);
+}
+
+async function runTurn(
+  session: AcpSession, connection: AcpConnection, request: AdapterRequest, options: AcpRunOptions, pool: AcpSessionPool,
+): Promise<Usage> {
+  const turn = new AcpTurn(session, connection, request);
+  const onAbort = () => {
+    turn.cancelApprovals();
+    connection.cancelPrompt();
+    void pool.invalidate(session, true);
+  };
+  connection.turn = turn;
+  request.signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    request.signal.throwIfAborted();
+    return await promptSession(session, connection, request, options.encode);
   } finally {
-    await rm(cwd, { force: true, recursive: true }).catch(() => undefined);
+    connection.turn = undefined;
+    request.signal.removeEventListener("abort", onAbort);
+    turn.cancelApprovals();
+  }
+}
+
+const sharedPool = new AcpSessionPool();
+const connections = new WeakMap<AcpSession, AcpConnection>();
+
+export function closeAcpConversation(conversationKey: string): Promise<void> {
+  return sharedPool.closeConversation(conversationKey);
+}
+
+export function shutdownAcpSessions(): Promise<void> {
+  return sharedPool.closeAll();
+}
+
+async function throwRunError(
+  error: unknown, session: AcpSession, request: AdapterRequest, options: AcpRunOptions, pool: AcpSessionPool,
+): Promise<never> {
+  await pool.invalidate(session, request.signal.aborted);
+  request.signal.throwIfAborted();
+  if (!(error instanceof AcpConnectionClosed || error instanceof AcpRpcError)) throw error;
+  const code = await session.closed;
+  const detail = error instanceof AcpRpcError ? extractErrorText(error.detail) : undefined;
+  const rpcDiagnostic = detail && classifyCliDiagnostic(detail, options.args)?.message;
+  const diagnostic = rpcDiagnostic ?? (await connections.get(session)?.diagnostic)?.message;
+  const fallback = error instanceof AcpConnectionClosed && code === 0
+    ? request.provider.name + " did not return a complete structured response."
+    : options.fallbackError;
+  throw new AdapterError(diagnostic ?? fallback, code ?? undefined);
+}
+
+export async function runAcpCli(request: AdapterRequest, options: AcpRunOptions): Promise<Usage> {
+  const { provider, model, signal } = request;
+  const executable = options.command ?? provider.command;
+  if (!executable) throw new AdapterError("This provider has no executable for structured runs.");
+  if (model && !isSafeCliModelName(model)) throw new AdapterError("Invalid model name.");
+  signal.throwIfAborted();
+
+  const pool = options.pool ?? sharedPool;
+  const session = pool.acquire({
+    providerId: provider.id,
+    conversationKey: request.conversationKey,
+    cwd: request.workingDirectory ?? request.workspacePath,
+    accessMode: normalizeExecutionMode(request.accessMode) ?? "isolated",
+  }, (cwd) => {
+    const target = spawnTarget(executable, options.args);
+    return spawn(target.command, target.args, {
+      cwd, env: cliEnv(options.env), detached: process.platform !== "win32",
+      shell: target.shell, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+  });
+
+  try {
+    let connection = connections.get(session);
+    if (!connection) {
+      connection = new AcpConnection(session, options.args, () => void pool.invalidate(session));
+      connections.set(session, connection);
+    }
+    const usage = await runTurn(session, connection, request, options, pool);
+    signal.throwIfAborted();
+    await pool.release(session);
+    if (session.key === undefined) signal.throwIfAborted();
+    return usage;
+  } catch (error) {
+    return throwRunError(error, session, request, options, pool);
   }
 }

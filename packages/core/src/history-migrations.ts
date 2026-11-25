@@ -57,6 +57,43 @@ const migrations = [
       )
     ), '') FROM runs AS r;
   `,
+  `
+    CREATE TABLE IF NOT EXISTS provider_sessions (
+      workspace TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      access_mode TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace, conversation_id, provider_id, access_mode)
+    );
+    CREATE INDEX IF NOT EXISTS provider_sessions_conv_idx
+      ON provider_sessions (workspace, conversation_id);
+    CREATE TABLE IF NOT EXISTS checkpoints (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      run_id TEXT,
+      created_at INTEGER NOT NULL,
+      restored_at INTEGER,
+      label TEXT NOT NULL,
+      files_count INTEGER NOT NULL,
+      metadata TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS checkpoints_workspace_idx
+      ON checkpoints (workspace, created_at DESC);
+    CREATE TABLE IF NOT EXISTS arenas (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      value TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS arenas_workspace_idx
+      ON arenas (workspace, created_at DESC);
+    SELECT workspace, conversation_id, provider_id, access_mode, session_id, updated_at FROM provider_sessions LIMIT 0;
+    SELECT id, workspace, run_id, created_at, restored_at, label, files_count, metadata FROM checkpoints LIMIT 0;
+    SELECT id, workspace, created_at, status, value FROM arenas LIMIT 0;
+  `,
 ] as const;
 
 const errorMessages = {

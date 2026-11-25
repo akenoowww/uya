@@ -1,4 +1,5 @@
-import type { EffortLevel, Provider } from "@ide/protocol";
+import type { EffortLevel, ExecutionMode, Provider } from "@ide/protocol";
+import { closeAcpConversation, shutdownAcpSessions } from "./acp-runner";
 import { runCli, type CliPrepare } from "./agents";
 import {
   geminiBlocked, openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli,
@@ -23,6 +24,10 @@ interface CliDefinition {
   terminalArgs?: string[];
   prepare?: CliPrepare;
   run?: (request: AdapterRequest) => Promise<Usage>;
+  closeSession?: (conversationKey: string) => Promise<void> | void;
+  shutdown?: () => Promise<void> | void;
+  supportedModes?: ExecutionMode[];
+  supportsPersistentSession?: boolean;
   blocked?: () => string | undefined;
   detail?: string;
 }
@@ -37,7 +42,10 @@ interface CachedCliModels {
 }
 
 function cliAdapter(
-  { id, name, command: configured, terminalArgs, prepare, run: customRun, blocked, detail }: CliDefinition,
+  {
+    id, name, command: configured, terminalArgs, prepare, run: customRun,
+    closeSession, shutdown, supportedModes, supportsPersistentSession, blocked, detail,
+  }: CliDefinition,
   discoverModels: CliModelDiscoverer,
 ): ProviderAdapter {
   let cached: CachedCliModels | undefined;
@@ -74,15 +82,20 @@ function cliAdapter(
       const command = executable(configured);
       const unavailable = command ? blocked?.() : "Executable missing from PATH";
       const discovered = command && executor && !unavailable ? await resolveModels(command, refresh) : undefined;
+      const canStructure = Boolean(command && executor && !unavailable);
       return {
         id, name, kind: "cli", command,
         ...(terminalArgs ? { terminalArgs } : {}),
-        available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && executor && !unavailable),
+        available: Boolean(command), terminal: Boolean(command), structured: canStructure,
         models: discovered?.models.length ? discovered.models : undefined,
         defaultModel: discovered?.defaultModel,
         supportedEfforts: discovered && (discovered.supportedEfforts ?? fallbackCliEfforts(id)),
         defaultEffort: discovered?.defaultEffort,
         modelEfforts: discovered?.modelEfforts,
+        ...(canStructure ? {
+          supportedModes: supportedModes ?? ["isolated"],
+          supportsPersistentSession: Boolean(supportsPersistentSession),
+        } : {}),
         detail: unavailable ?? detail,
       };
     },
@@ -91,6 +104,8 @@ function cliAdapter(
       if (reason) throw new AdapterError(reason);
       return executor(request);
     }),
+    closeSession,
+    shutdown,
   };
 }
 
@@ -117,6 +132,7 @@ function runtimeAdapter({
         terminal: Boolean(command),
         structured: models.length > 0,
         supportedEfforts: models.length ? supportedEfforts : undefined,
+        ...(models.length ? { supportedModes: ["isolated"] as ExecutionMode[], supportsPersistentSession: false } : {}),
         detail: models.length ? undefined : "Start its local inference server with a local model",
       };
     },
@@ -182,15 +198,36 @@ export class ProviderRegistry {
 
     const cli = (definition: CliDefinition) => cliAdapter(definition, discoverCli);
 
+    const workspaceModes: ExecutionMode[] = ["isolated", "read-only", "agent"];
     const adapters = [
-      cli({ id: "codex", name: "Codex", command: "codex", prepare: prepareCodex }),
-      cli({ id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude }),
-      cli({ id: "antigravity", name: "Antigravity", command: "agy", run: runAntigravity }),
-      cli({ id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGeminiCli, blocked: geminiBlocked }),
-      cli({ id: "gemini-api", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGeminiApi }),
-      cli({ id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen }),
+      cli({
+        id: "codex", name: "Codex", command: "codex", prepare: prepareCodex,
+        supportedModes: workspaceModes, supportsPersistentSession: true,
+      }),
+      cli({
+        id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude,
+        supportedModes: workspaceModes, supportsPersistentSession: true,
+      }),
+      cli({
+        id: "antigravity", name: "Antigravity", command: "agy", run: runAntigravity,
+        closeSession: closeAcpConversation, shutdown: shutdownAcpSessions,
+        supportedModes: workspaceModes, supportsPersistentSession: true,
+      }),
+      cli({
+        id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGeminiCli, blocked: geminiBlocked,
+        supportedModes: workspaceModes, supportsPersistentSession: false,
+      }),
+      cli({
+        id: "gemini-api", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGeminiApi,
+        supportedModes: ["isolated"], supportsPersistentSession: false,
+      }),
+      cli({
+        id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen,
+        supportedModes: ["isolated"], supportsPersistentSession: false,
+      }),
       cli({
         id: "opencode", name: "OpenCode", command: "opencode", prepare: prepareOpenCode, blocked: openCodeBlocked,
+        supportedModes: workspaceModes, supportsPersistentSession: false,
         detail: "Structured uses authentication from the CLI environment. Saved profiles are available in Terminal.",
       }),
       cli({ id: "kimi", name: "Kimi Code", command: "kimi" }),
@@ -223,5 +260,17 @@ export class ProviderRegistry {
       throw new AdapterError("This provider has no structured adapter.");
     }
     return await adapter.run(request);
+  }
+
+  async closeSession(conversationKey: string): Promise<void> {
+    await Promise.allSettled(
+      Array.from(this.adapters.values(), (adapter) => adapter.closeSession?.(conversationKey)),
+    );
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.allSettled(
+      Array.from(this.adapters.values(), (adapter) => adapter.shutdown?.()),
+    );
   }
 }

@@ -9,10 +9,10 @@
 
 ## Security Architecture Summary
 
-Uya is designed as a local-first desktop workbench with explicit boundaries:
+Uya is designed as a local-first desktop workbench with explicit boundaries (see [docs/security.md](docs/security.md) for the complete model):
 - The Tauri desktop shell manages the local Bun sidecar (`uya-core`), which binds strictly to `127.0.0.1` on an ephemeral port and requires a per-session random bearer token for JSON-RPC and WebSocket requests.
-- Structured CLI runs execute in temporary directories with tool calls disabled or restricted (`sandbox-exec` on macOS for Custom CLI structured mode).
-- The built-in file explorer and editor confine reads/writes to the user-selected workspace directory, exclude symlinks/hardlinks outside the workspace, block sensitive config files (such as `.env.local` and credential manifests), and verify file revisions on save.
+- Structured CLI runs support explicit per-split access modes: `isolated` (disposable scratch directory with tools disabled, plus `sandbox-exec` on macOS for Custom CLI), `read-only` (Explore — read/search tools only), and `agent` (workspace or isolated Git worktree edits gated by inline approval cards and automatic pre-run checkpoints).
+- The built-in file explorer, ripgrep search, Git client, Worktree Arena, and editor confine access to the user-selected workspace directory, refuse external symlinks/hardlinks, block sensitive config files (such as `.env*` and credential manifests), neutralize Git hooks/filters, and verify file revisions on save.
 - Local model runtimes (Ollama, llama.cpp, MLX, LM Studio) are probed strictly on `127.0.0.1`.
 
 ## Reporting a Vulnerability

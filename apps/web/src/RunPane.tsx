@@ -41,7 +41,7 @@ export function RunStatus({ run }: { run: RunSummary | undefined }) {
 function groupEvents(events: RunEvent[]) {
   const groups: { seq: number; type: "text" | "thinking" | "tool"; text: string }[] = [];
   for (const event of events) {
-    if (event.type === "status") continue;
+    if (event.type !== "text" && event.type !== "thinking" && event.type !== "tool") continue;
     const last = groups.at(-1);
     if (last?.type === event.type && event.type !== "tool") last.text += event.text;
     else groups.push({ seq: event.seq, type: event.type, text: event.text });

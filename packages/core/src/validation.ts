@@ -35,11 +35,21 @@ const fileText = text("File content", 1_048_576, true);
 const revision = text("Revision", 256);
 const providerId = text("Provider ID", 100);
 const runId = text("Run ID", 100);
+const entityId = (label: string) => text(label, 100).regex(/^[A-Za-z0-9_-]+$/, { error: `Invalid ${label.toLowerCase()}.` });
 const conversationId = text("Conversation ID", 100)
   .regex(/^[A-Za-z0-9_-]+$/, { error: "Invalid conversation ID." });
 const broadcastGroupId = text("Broadcast group ID", 100)
   .regex(/^[A-Za-z0-9_-]+$/, { error: "Invalid broadcast group ID." });
 const effortLevel = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"], { error: "Unknown effort level." });
+const executionMode = z.enum(["isolated", "read-only", "agent"], { error: "Unknown execution mode." });
+const approvalDecision = z.enum(["allow_once", "allow_session", "reject"], { error: "Unknown approval decision." });
+const modelName = text("Model", 256).refine((value) => !value.startsWith("-") && !/[\x00-\x1f\x7f]/.test(value), {
+  error: "Invalid model name.",
+});
+const gitBranchName = text("Branch name", 256).refine(
+  (value) => !value.startsWith("-") && !/[\s~^:?*[\]\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock$/u.test(value),
+  { error: "Invalid Git branch name." },
+);
 const attachmentByteLimit = 128 * 1024;
 const attachments = boundedArray(z.object({
   path: filePath,
@@ -68,10 +78,14 @@ const runInput = z.object({
   broadcastGroupId: broadcastGroupId.optional(),
   workspacePath: projectPath.nullable().optional(),
   providerId: providerId.optional(),
-  model: text("Model", 256).refine((value) => !value.startsWith("-") && !/[\x00-\x1f\x7f]/.test(value), {
-    error: "Invalid model name.",
-  }).optional(),
+  model: modelName.optional(),
   effort: effortLevel.optional(),
+  accessMode: executionMode.optional(),
+  includeWorkspaceMap: z.boolean({ error: "Include workspace map must be a boolean." }).optional(),
+  activeFilePath: filePath.optional(),
+  arenaId: entityId("Arena ID").optional(),
+  arenaSlotId: entityId("Arena slot ID").optional(),
+  createCheckpoint: z.boolean({ error: "Create checkpoint must be a boolean." }).optional(),
   prompt: text("Prompt", 256_000),
   contextPaths: boundedArray(filePath, 20, "Select up to 20 context files.").optional(),
   attachments: attachments.optional(),
@@ -111,6 +125,24 @@ const promptValues = z.custom<Record<string, unknown>>((value) => {
   .pipe(z.array(z.tuple([z.string(), text("Variable value", 128_000, true)])))
   .transform((entries) => Object.fromEntries(entries));
 
+const arenaSlotInput = z.object({
+  paneId: text("Pane ID", 100),
+  providerId,
+  providerName: text("Provider name", 100),
+  model: modelName.optional(),
+  effort: effortLevel.optional(),
+}, { error: "Each arena slot must be an object." });
+
+const searchOptions = z.object({
+  query: text("Search query", 512),
+  caseSensitive: z.boolean({ error: "Case sensitive must be a boolean." }).optional(),
+  regex: z.boolean({ error: "Regex must be a boolean." }).optional(),
+  wholeWord: z.boolean({ error: "Whole word must be a boolean." }).optional(),
+  glob: text("Glob filter", 256, true).optional(),
+  maxResults: integer("Result limit", 1, 500).optional(),
+  workspacePath: projectPath.optional(),
+});
+
 const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "providers.list": z.object({ refresh: z.boolean({ error: "Refresh must be a boolean." }).optional() }),
   "providers.add": customProvider,
@@ -126,6 +158,15 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "runs.deleteConversation": z.object({ id: conversationId, workspacePath: projectPath.nullable() }),
   "runs.usage": z.object({ days: integer("Usage window in days", 1, Number.MAX_SAFE_INTEGER).optional() }),
   "runs.cancel": z.object({ id: runId }),
+  "runs.respondApproval": z.object({
+    runId,
+    requestId: entityId("Approval request ID"),
+    decision: approvalDecision,
+  }),
+  "runs.closeSession": z.object({
+    conversationId,
+    workspacePath: projectPath.nullable(),
+  }),
   "runs.getRules": z.object({}),
   "runs.setRules": z.object({ rules: boundedArray(routingRule, 50, "Set up to 50 routing rules.") }),
   "workspace.open": z.object({ path: projectPath }),
@@ -136,6 +177,7 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
     limit: integer("Result limit", 1, 500).optional(),
     workspacePath: projectPath.optional(),
   }),
+  "workspace.search": searchOptions,
   "workspace.read": z.object({ path: filePath, workspacePath: projectPath.optional() }),
   "workspace.write": z.object({ path: filePath, text: fileText, revision, workspacePath: projectPath.optional() }),
   "workspace.create": z.object({
@@ -153,6 +195,88 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
     staged: z.boolean({ error: "Staged must be a boolean." }).optional(),
     workspacePath: projectPath.optional(),
   }),
+  "git.stage": z.object({
+    paths: boundedArray(filePath, 200, "Select up to 200 paths.").optional(),
+    all: z.boolean({ error: "All must be a boolean." }).optional(),
+    workspacePath: projectPath.optional(),
+  }),
+  "git.unstage": z.object({
+    paths: boundedArray(filePath, 200, "Select up to 200 paths.").optional(),
+    all: z.boolean({ error: "All must be a boolean." }).optional(),
+    workspacePath: projectPath.optional(),
+  }),
+  "git.discard": z.object({
+    paths: boundedArray(filePath, 200, "Select up to 200 paths.").refine((value) => value.length > 0, {
+      error: "Select at least one path to discard.",
+    }),
+    workspacePath: projectPath.optional(),
+  }),
+  "git.commit": z.object({
+    message: text("Commit message", 8192),
+    workspacePath: projectPath.optional(),
+  }),
+  "git.branches": z.object({ workspacePath: projectPath.optional() }),
+  "git.checkout": z.object({
+    branch: gitBranchName,
+    workspacePath: projectPath.optional(),
+  }),
+  "git.createBranch": z.object({
+    name: gitBranchName,
+    checkout: z.boolean({ error: "Checkout must be a boolean." }).optional(),
+    workspacePath: projectPath.optional(),
+  }),
+  "git.log": z.object({
+    limit: integer("Commit limit", 1, 100).optional(),
+    workspacePath: projectPath.optional(),
+  }),
+  "checkpoints.list": z.object({
+    workspacePath: projectPath.optional(),
+    limit: integer("Checkpoint limit", 1, 100).optional(),
+  }),
+  "checkpoints.restore": z.object({
+    id: entityId("Checkpoint ID"),
+    workspacePath: projectPath.optional(),
+  }),
+  "arena.create": z.object({
+    workspacePath: projectPath.optional(),
+    prompt: text("Prompt", 256_000),
+    slots: boundedArray(arenaSlotInput, 6, "Use between 2 and 6 arena slots.").refine((value) => value.length >= 2, {
+      error: "Use between 2 and 6 arena slots.",
+    }),
+    includeDirty: z.boolean({ error: "Include dirty changes must be a boolean." }).optional(),
+  }),
+  "arena.get": z.object({ id: entityId("Arena ID") }),
+  "arena.list": z.object({
+    workspacePath: projectPath.optional(),
+    limit: integer("Arena limit", 1, 50).optional(),
+  }),
+  "arena.slotDiff": z.object({
+    arenaId: entityId("Arena ID"),
+    slotId: entityId("Arena slot ID"),
+    path: filePath.optional(),
+  }),
+  "arena.verify": z.object({
+    arenaId: entityId("Arena ID"),
+    slotId: entityId("Arena slot ID"),
+    command: text("Verify command", 1024),
+  }),
+  "arena.apply": z.object({
+    arenaId: entityId("Arena ID"),
+    slotId: entityId("Arena slot ID"),
+    mode: z.enum(["workspace", "branch"], { error: "Unknown arena apply mode." }),
+    branchName: gitBranchName.optional(),
+    cleanup: z.boolean({ error: "Cleanup must be a boolean." }).optional(),
+  }),
+  "arena.discard": z.object({ arenaId: entityId("Arena ID") }),
+  "verify.presets": z.object({ workspacePath: projectPath.optional() }),
+  "verify.start": z.object({
+    command: text("Verify command", 1024),
+    workspacePath: projectPath.optional(),
+    arenaId: entityId("Arena ID").optional(),
+    arenaSlotId: entityId("Arena slot ID").optional(),
+  }),
+  "verify.get": z.object({ id: entityId("Verify run ID") }),
+  "verify.cancel": z.object({ id: entityId("Verify run ID") }),
   "prompts.list": z.object({}),
   "prompts.read": z.object({ ref: promptRef }),
   "prompts.write": z.object({ ref: promptRef, source: text("Prompt source", 1_048_576, true), revision: revision.optional() }),

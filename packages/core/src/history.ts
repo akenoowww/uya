@@ -2,13 +2,17 @@ import { Database } from "bun:sqlite";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import type {
-  ConversationSummary, Provider, ProviderUsageStats, RoutingRule, RunDetail, RunEvent, RunInput, RunSummary, UsageStats,
+  ApprovalDecision, ApprovalRequest, ConversationSummary, Provider, ProviderUsageStats,
+  RoutingRule, RunDetail, RunEvent, RunInput, RunSummary, ToolMeta, UsageStats,
 } from "@ide/protocol";
 import { migrateHistory } from "./history-migrations";
 import { RpcError } from "./validation";
 
 export type RunEventPayload =
-  | { type: "text" | "thinking" | "tool"; text: string }
+  | { type: "text" | "thinking"; text: string }
+  | { type: "tool"; text: string; meta?: ToolMeta }
+  | { type: "approval_request"; request: ApprovalRequest }
+  | { type: "approval_resolved"; requestId: string; decision: ApprovalDecision }
   | { type: "status"; run: RunSummary };
 
 type StoredValue = { value: string };

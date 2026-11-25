@@ -1,4 +1,38 @@
 export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ExecutionMode = "isolated" | "read-only" | "agent";
+export type ToolKind = "read" | "search" | "edit" | "write" | "shell" | "fetch" | "other";
+export type ToolStatus = "running" | "done" | "error";
+export type ApprovalDecision = "allow_once" | "allow_session" | "reject";
+
+export interface ToolMeta {
+  id?: string;
+  name: string;
+  kind: ToolKind;
+  status: ToolStatus;
+  path?: string;
+  command?: string;
+  summary?: string;
+  output?: string;
+}
+
+export interface ApprovalOption {
+  id: string;
+  label: string;
+  kind: "allow_once" | "allow_session" | "reject_once" | "reject_always";
+}
+
+export interface ApprovalRequest {
+  requestId: string;
+  runId: string;
+  toolName: string;
+  toolKind: ToolKind;
+  title: string;
+  detail?: string;
+  path?: string;
+  command?: string;
+  options: ApprovalOption[];
+  createdAt: number;
+}
 
 export interface Provider {
   id: string;
@@ -16,6 +50,8 @@ export interface Provider {
   supportedEfforts?: EffortLevel[];
   defaultEffort?: EffortLevel;
   modelEfforts?: Record<string, EffortLevel[]>;
+  supportedModes?: ExecutionMode[];
+  supportsPersistentSession?: boolean;
   detail?: string;
 }
 
@@ -46,6 +82,12 @@ export interface RunInput {
   providerId?: string;
   model?: string;
   effort?: EffortLevel;
+  accessMode?: ExecutionMode;
+  includeWorkspaceMap?: boolean;
+  activeFilePath?: string;
+  arenaId?: string;
+  arenaSlotId?: string;
+  createCheckpoint?: boolean;
   broadcastGroupId?: string;
   includeProjectRules?: boolean;
   prompt: string;
@@ -68,6 +110,7 @@ export interface RunSummary {
   providerName?: string;
   model?: string;
   effort?: EffortLevel;
+  accessMode?: ExecutionMode;
   prompt: string;
   status: RunStatus;
   startedAt: number;
@@ -76,12 +119,21 @@ export interface RunSummary {
   exitCode?: number;
   error?: string;
   inputTokens?: number;
+  cachedInputTokens?: number;
   outputTokens?: number;
+  estimatedCostUsd?: number;
+  checkpointId?: string;
+  arenaId?: string;
+  arenaSlotId?: string;
+  providerSessionId?: string;
   promptVersion?: string;
 }
 
 export type RunEvent = { runId: string; seq: number } & (
-  | { type: "text" | "thinking" | "tool"; text: string }
+  | { type: "text" | "thinking"; text: string }
+  | { type: "tool"; text: string; meta?: ToolMeta }
+  | { type: "approval_request"; request: ApprovalRequest }
+  | { type: "approval_resolved"; requestId: string; decision: ApprovalDecision }
   | { type: "status"; run: RunSummary }
 );
 
@@ -109,6 +161,37 @@ export interface TextFile {
 
 export type TextContext = Pick<TextFile, "path" | "text">;
 export type EditorSelection = TextFile;
+
+export interface SearchOptions {
+  query: string;
+  caseSensitive?: boolean;
+  regex?: boolean;
+  wholeWord?: boolean;
+  glob?: string;
+  maxResults?: number;
+  workspacePath?: string;
+}
+
+export interface SearchMatch {
+  line: number;
+  column: number;
+  text: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface SearchFileResult {
+  path: string;
+  matches: SearchMatch[];
+}
+
+export interface SearchResponse {
+  query: string;
+  files: SearchFileResult[];
+  totalMatches: number;
+  truncated: boolean;
+  engine: "rg" | "native";
+}
 
 export interface PromptRef {
   scope: "project" | "global";
@@ -168,6 +251,127 @@ export interface GitDiffResult {
   modified?: string;
 }
 
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  upstream?: string;
+  commit?: string;
+}
+
+export interface GitCommit {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  date: string;
+}
+
+export interface GitCommitResult {
+  hash: string;
+  shortHash: string;
+  branch: string;
+  subject: string;
+}
+
+export interface CheckpointSummary {
+  id: string;
+  runId?: string;
+  workspacePath: string;
+  createdAt: number;
+  label: string;
+  filesCount: number;
+  restoredAt?: number;
+}
+
+export interface CheckpointRestoreResult {
+  id: string;
+  restoredFiles: string[];
+  removedFiles: string[];
+}
+
+export interface ArenaSlotFileStat {
+  path: string;
+  status: GitFileStatus;
+  additions: number;
+  deletions: number;
+}
+
+export interface ArenaVerifySummary {
+  command: string;
+  status: "idle" | "running" | "passed" | "failed" | "cancelled";
+  exitCode?: number | null;
+  durationMs?: number;
+  output?: string;
+}
+
+export interface ArenaSlotInput {
+  paneId: string;
+  providerId: string;
+  providerName: string;
+  model?: string;
+  effort?: EffortLevel;
+}
+
+export interface ArenaSlot {
+  id: string;
+  arenaId: string;
+  paneId: string;
+  providerId: string;
+  providerName: string;
+  model?: string;
+  effort?: EffortLevel;
+  runId?: string;
+  branch: string;
+  worktreePath: string;
+  status: "ready" | "running" | "succeeded" | "failed" | "applied" | "discarded";
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  files: ArenaSlotFileStat[];
+  verify?: ArenaVerifySummary;
+}
+
+export interface ArenaSummary {
+  id: string;
+  workspacePath: string;
+  baseBranch: string;
+  baseCommit: string;
+  prompt: string;
+  createdAt: number;
+  status: "active" | "applied" | "discarded";
+  appliedSlotId?: string;
+  slots: ArenaSlot[];
+}
+
+export interface ArenaApplyResult {
+  arenaId: string;
+  slotId: string;
+  mode: "workspace" | "branch";
+  branchName?: string;
+  checkpointId?: string;
+  appliedFiles: string[];
+}
+
+export interface VerifyPreset {
+  id: string;
+  label: string;
+  command: string;
+  source: string;
+}
+
+export interface VerifyRun {
+  id: string;
+  workspacePath: string;
+  cwd: string;
+  command: string;
+  status: "running" | "passed" | "failed" | "cancelled";
+  startedAt: number;
+  finishedAt?: number;
+  exitCode?: number | null;
+  output: string;
+  truncated: boolean;
+}
+
 export interface ProjectRuleFile {
   path: string;
   bytes: number;
@@ -194,7 +398,9 @@ export interface ProviderUsageStats {
   failed: number;
   avgTtftMs?: number;
   inputTokens: number;
+  cachedInputTokens?: number;
   outputTokens: number;
+  estimatedCostUsd?: number;
   efforts: Record<string, number>;
 }
 
@@ -221,12 +427,15 @@ export interface RpcMethods {
   "runs.deleteConversation": [{ id: string; workspacePath: string | null }, null];
   "runs.usage": [{ days?: number }, UsageStats];
   "runs.cancel": [{ id: string }, null];
+  "runs.respondApproval": [{ runId: string; requestId: string; decision: ApprovalDecision }, null];
+  "runs.closeSession": [{ conversationId: string; workspacePath: string | null }, null];
   "runs.getRules": [Empty, RoutingRule[]];
   "runs.setRules": [{ rules: RoutingRule[] }, RoutingRule[]];
   "workspace.open": [{ path: string }, WorkspaceInfo];
   "workspace.close": [{ path: string }, null];
   "workspace.list": [{ path?: string; workspacePath?: string }, DirectoryEntry[]];
   "workspace.files": [{ query?: string; limit?: number; workspacePath?: string }, string[]];
+  "workspace.search": [SearchOptions, SearchResponse];
   "workspace.read": [{ path: string; workspacePath?: string }, TextFile];
   "workspace.write": [{ path: string; text: string; revision: string; workspacePath?: string }, TextFile];
   "workspace.create": [{ path: string; kind: "file" | "directory"; text?: string; workspacePath?: string }, DirectoryEntry];
@@ -235,6 +444,27 @@ export interface RpcMethods {
   "workspace.projectRules": [{ workspacePath?: string }, ProjectRuleFile[]];
   "git.status": [{ workspacePath?: string }, GitStatus];
   "git.diff": [{ path?: string; staged?: boolean; workspacePath?: string }, GitDiffResult];
+  "git.stage": [{ paths?: string[]; all?: boolean; workspacePath?: string }, GitStatus];
+  "git.unstage": [{ paths?: string[]; all?: boolean; workspacePath?: string }, GitStatus];
+  "git.discard": [{ paths: string[]; workspacePath?: string }, GitStatus];
+  "git.commit": [{ message: string; workspacePath?: string }, GitCommitResult];
+  "git.branches": [{ workspacePath?: string }, GitBranch[]];
+  "git.checkout": [{ branch: string; workspacePath?: string }, GitStatus];
+  "git.createBranch": [{ name: string; checkout?: boolean; workspacePath?: string }, GitStatus];
+  "git.log": [{ limit?: number; workspacePath?: string }, GitCommit[]];
+  "checkpoints.list": [{ workspacePath?: string; limit?: number }, CheckpointSummary[]];
+  "checkpoints.restore": [{ id: string; workspacePath?: string }, CheckpointRestoreResult];
+  "arena.create": [{ workspacePath?: string; prompt: string; slots: ArenaSlotInput[]; includeDirty?: boolean }, ArenaSummary];
+  "arena.get": [{ id: string }, ArenaSummary];
+  "arena.list": [{ workspacePath?: string; limit?: number }, ArenaSummary[]];
+  "arena.slotDiff": [{ arenaId: string; slotId: string; path?: string }, GitDiffResult];
+  "arena.verify": [{ arenaId: string; slotId: string; command: string }, ArenaSlot];
+  "arena.apply": [{ arenaId: string; slotId: string; mode: "workspace" | "branch"; branchName?: string; cleanup?: boolean }, ArenaApplyResult];
+  "arena.discard": [{ arenaId: string }, null];
+  "verify.presets": [{ workspacePath?: string }, VerifyPreset[]];
+  "verify.start": [{ command: string; workspacePath?: string; arenaId?: string; arenaSlotId?: string }, VerifyRun];
+  "verify.get": [{ id: string }, VerifyRun];
+  "verify.cancel": [{ id: string }, null];
   "prompts.list": [Empty, PromptSummary[]];
   "prompts.read": [{ ref: PromptRef }, PromptDocument];
   "prompts.write": [{ ref: PromptRef; source: string; revision?: string }, PromptDocument];

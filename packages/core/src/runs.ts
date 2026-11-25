@@ -190,14 +190,15 @@ export class Runs {
       const timeout = AbortSignal.timeout(ATTEMPT_TIMEOUT_MS);
       const attempt = AbortSignal.any([signal, timeout]);
       const output: AdapterOutput = {
-        emit: (type, text) => {
+        emit: (type, text, meta) => {
           if (!text) return;
           textChars += text.length;
           if (textChars > MAX_TEXT_CHARS) throw new AdapterError("The run exceeded the text output limit.");
           if (type === "text" && run.ttftMs === undefined) {
             run = { ...run, ttftMs: Math.round(performance.now() - attemptStartedAt) };
           }
-          this.event(run.id, { type, text });
+          if (type === "tool") this.event(run.id, { type, text, ...(meta ? { meta } : {}) });
+          else this.event(run.id, { type, text });
         },
         raw: (line) => {
           rawChars += line.length;

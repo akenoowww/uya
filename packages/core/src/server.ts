@@ -81,6 +81,10 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       runs.cancel(id);
       return null;
     },
+    "runs.respondApproval": () => {
+      throw new RpcError(-32601, "Method not yet wired.");
+    },
+    "runs.closeSession": () => null,
     "runs.getRules": () => history.rules(),
     "runs.setRules": ({ rules }) => history.setRules(rules),
     "workspace.open": (params) => workspace.open(params),
@@ -96,6 +100,9 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
     "workspace.files": ({ workspacePath: requestedPath, ...params }) => {
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.files(params);
+    },
+    "workspace.search": () => {
+      throw new RpcError(-32601, "Method not yet wired.");
     },
     "workspace.read": ({ workspacePath: requestedPath, ...params }) => {
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
@@ -124,6 +131,27 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
     },
     "git.status": ({ workspacePath }) => gitStatus(gitRoot(workspacePath)),
     "git.diff": ({ workspacePath, ...params }) => gitDiff(gitRoot(workspacePath), params),
+    "git.stage": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.unstage": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.discard": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.commit": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.branches": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.checkout": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.createBranch": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "git.log": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "checkpoints.list": () => [],
+    "checkpoints.restore": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.create": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.get": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.list": () => [],
+    "arena.slotDiff": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.verify": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.apply": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "arena.discard": () => null,
+    "verify.presets": () => [],
+    "verify.start": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "verify.get": () => { throw new RpcError(-32601, "Method not yet wired."); },
+    "verify.cancel": () => null,
     "prompts.list": () => workspace.listPrompts(),
     "prompts.read": (params) => workspace.readPrompt(params),
     "prompts.write": (params) => workspace.writePrompt(params),

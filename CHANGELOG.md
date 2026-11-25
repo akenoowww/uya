@@ -4,6 +4,27 @@ All notable changes to **Uya** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-26
+
+### Added
+
+- **Per-Split Workspace Access Modes (`Isolated` / `Explore` / `Agent`)**: Choose each split's workspace boundary via `AccessModePicker`, `/mode`, or the Command Palette. When a project folder is open, supported agents default to **Explore (`read-only`)** so they can inspect your real repository immediately instead of an empty temp folder; **Agent** mode enables workspace edits gated by inline approval cards (`Allow once` / `Allow session` / `Deny`) and automatic pre-run checkpoints.
+- **Worktree Agent Arena**: Toggle **Worktree Arena** in the Broadcast bar (`/arena on`) to run two or more agents concurrently in isolated `git worktree` sandboxes seeded with non-protected local WIP. Inspect per-slot diffs in Monaco, verify every branch with your project's test suite, run patch-aware cross-model Judge reviews on real unified Git diffs, and atomically apply the winner to your workspace (with automatic checkpoint rollback) or publish it as a clean new Git branch.
+- **Persistent Live Sessions & Prompt Caching**: Added `AcpSessionPool` (idle TTL + LRU cap) for warm Antigravity ACP sessions and native session resume (`codex exec resume`, `claude --resume`) persisted in SQLite v4 (`provider_sessions`), surfacing **Live** badges, cache-hit percentages, and estimated run costs in transcripts and Usage Insights.
+- **Structured Tool Cards & Reversible Checkpoints (`/undo`)**: Renders structured `ToolMeta` events (read, search, edit, shell, fetch) with clickable file links and expandable output, plus automatic pre-run workspace snapshots (`checkpoints.*`) with inline **Undo turn** restoration.
+- **Workspace Code Search (`⌘⇧F` / `Ctrl+Shift+F`)**: Ripgrep (`rg --json`) full-text search with confined native TypeScript fallback, case/word/regex/glob filters, jump-to-line in Monaco, and one-click context attachment.
+- **Full Local Git Client (`⌘⇧G` / `Ctrl+Shift+G`)**: Hardened local Git mutations (`git.stage`, `git.unstage`, `git.discard`, `git.commit`, `git.branches`, `git.checkout`, `git.createBranch`, `git.log`) with hooks/filters disabled, AI-generated Conventional Commit messages, statusbar branch switcher, and collapsible recent commit history.
+- **Async Verification Runner & Auto-Fix Loop**: Auto-discovers project scripts from `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, and `Makefile`, streams live output in the titlebar Verify popover (`/verify`), supports cancellation, and attaches failing output as `@verify` context with **Send failure to agent**.
+- **Compact `@workspace-map`, Multi-File Diff/Apply & Run in Terminal**: Optional 2-level repository map (<= 6 KiB) for stateless/local models (`Ollama`, `llama.cpp`, `MLX`, `LM Studio`, `Gemini API`, `Qwen`), multi-file unified diff preview/apply tabs in Monaco, **Run in Terminal** for shell code blocks, and an onboarding Welcome Card with quick access to recent projects.
+- **Flagship Documentation**: Redesigned `README.md` and `README.kk.md` with custom SVG showcase & workflow diagrams (`docs/assets/`) and dedicated `docs/architecture.md`, `docs/arena.md`, `docs/providers.md`, and `docs/security.md` guides.
+
+### Fixed
+
+- Separated consecutive Codex `agent_message` text items cleanly with paragraph breaks instead of gluing sentences together.
+- Filtered macOS/Windows Explorer clutter (`.DS_Store`, `Thumbs.db`, `desktop.ini`) from workspace file trees and searches.
+- Replaced raw millisecond readouts (e.g. `6686ms`) in the Broadcast summary bar with consistent compact durations (`6.7 s`).
+- Replaced `Diff / Apply` on shell code blocks (`sh`, `bash`, `zsh`, `powershell`) with **Run in Terminal**.
+
 ## [0.3.2] - 2026-11-25
 
 ### Added
@@ -90,6 +111,7 @@ Initial public release of **Uya** — a local-first multi-agent AI workbench for
 - **Local Persistence & Security**: Tauri + compiled Bun sidecar communicating over random-port loopback (`127.0.0.1`) with per-session auth tokens, versioned SQLite migrations, and per-project Dockview layout/conversation restoration.
 - **Cross-Platform Distribution**: Native macOS `.app` / `.dmg` (Apple Silicon & Intel) and Windows 10/11 NSIS `.exe` / `.msi` installers with custom **Uya** iconography and automated GitHub Actions CI & release workflows.
 
+[0.4.0]: https://github.com/akenoowww/uya/releases/tag/v0.4.0
 [0.3.2]: https://github.com/akenoowww/uya/releases/tag/v0.3.2
 [0.3.1]: https://github.com/akenoowww/uya/releases/tag/v0.3.1
 [0.3.0]: https://github.com/akenoowww/uya/releases/tag/v0.3.0

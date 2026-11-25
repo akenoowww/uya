@@ -95,7 +95,7 @@ export function createRunStreams(
       watchdogTimer = undefined;
       cursor = event.seq;
       pending.push(event);
-      if (event.type === "status") flush();
+      if (event.type === "status" || event.type === "approval_request" || event.type === "approval_resolved") flush();
       else batchTimer ??= setTimeout(flush, BATCH_INTERVAL_MS);
     }
 

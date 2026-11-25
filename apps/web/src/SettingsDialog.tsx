@@ -140,14 +140,20 @@ function UsagePanel({ rpc, active }: { rpc: RpcCall | undefined; active: boolean
   const totals = stats ? stats.byProvider.reduce(
     (acc, row) => ({
       succeeded: acc.succeeded + row.succeeded,
+      inputTokens: acc.inputTokens + row.inputTokens,
+      cachedInputTokens: acc.cachedInputTokens + (row.cachedInputTokens ?? 0),
       tokens: acc.tokens + row.inputTokens + row.outputTokens,
+      costUsd: acc.costUsd + (row.estimatedCostUsd ?? 0),
       ttftWeighted: acc.ttftWeighted + (row.avgTtftMs ?? 0) * (row.avgTtftMs !== undefined ? row.runs : 0),
       ttftRuns: acc.ttftRuns + (row.avgTtftMs !== undefined ? row.runs : 0),
     }),
-    { succeeded: 0, tokens: 0, ttftWeighted: 0, ttftRuns: 0 },
+    { succeeded: 0, inputTokens: 0, cachedInputTokens: 0, tokens: 0, costUsd: 0, ttftWeighted: 0, ttftRuns: 0 },
   ) : null;
   const overallSuccess = stats && stats.totalRuns > 0 && totals ? Math.round((totals.succeeded / stats.totalRuns) * 100) : 0;
   const overallTtft = totals && totals.ttftRuns > 0 ? Math.round(totals.ttftWeighted / totals.ttftRuns) : undefined;
+  const overallCachePct = totals && totals.inputTokens > 0 && totals.cachedInputTokens > 0
+    ? Math.min(100, Math.round((totals.cachedInputTokens / totals.inputTokens) * 100))
+    : 0;
 
   return (
     <Stack gap="sm">
@@ -187,17 +193,33 @@ function UsagePanel({ rpc, active }: { rpc: RpcCall | undefined; active: boolean
                 </Paper>
                 <Paper p="xs" withBorder bg="dark.8">
                   <Text size="10px" c="dimmed" tt="uppercase">Avg TTFT</Text>
-                  <Text size="md" fw={650} ff="monospace">{overallTtft !== undefined ? `${overallTtft}ms` : "—"}</Text>
+                  <Text size="md" fw={650} ff="monospace">
+                    {overallTtft !== undefined
+                      ? overallTtft < 1000 ? `${overallTtft} ms` : `${(overallTtft / 1000).toFixed(1)} s`
+                      : "—"}
+                  </Text>
                 </Paper>
                 <Paper p="xs" withBorder bg="dark.8">
-                  <Text size="10px" c="dimmed" tt="uppercase">Tokens</Text>
-                  <Text size="md" fw={650} ff="monospace">{totals ? totals.tokens.toLocaleString() : 0}</Text>
+                  <Text size="10px" c="dimmed" tt="uppercase">
+                    {totals && totals.costUsd > 0 ? "Est. Cost" : "Tokens"}
+                  </Text>
+                  <Text size="md" fw={650} ff="monospace">
+                    {totals && totals.costUsd > 0
+                      ? `~$${totals.costUsd < 0.01 ? totals.costUsd.toFixed(4) : totals.costUsd.toFixed(2)}`
+                      : totals ? totals.tokens.toLocaleString() : 0}
+                  </Text>
+                  {overallCachePct > 0 && (
+                    <Text size="10px" c="teal.3" ff="monospace">{overallCachePct}% cache hit</Text>
+                  )}
                 </Paper>
               </SimpleGrid>
 
               {stats.byProvider.map((row) => {
                 const rate = row.runs > 0 ? Math.round((row.succeeded / row.runs) * 100) : 0;
                 const share = stats.totalRuns > 0 ? Math.round((row.runs / stats.totalRuns) * 100) : 0;
+                const rowCachePct = row.inputTokens > 0 && row.cachedInputTokens
+                  ? Math.min(100, Math.round((row.cachedInputTokens / row.inputTokens) * 100))
+                  : 0;
                 const effortEntries = Object.entries(row.efforts);
                 return (
                   <Paper key={row.providerId} p="xs" withBorder radius="sm" bg="dark.8">
@@ -207,6 +229,11 @@ function UsagePanel({ rpc, active }: { rpc: RpcCall | undefined; active: boolean
                         <Text size="xs" fw={620}>{row.providerName}</Text>
                       </Group>
                       <Group gap={6}>
+                        {row.estimatedCostUsd !== undefined && row.estimatedCostUsd > 0 && (
+                          <Badge size="xs" variant="outline" color="gray" ff="monospace">
+                            ~${row.estimatedCostUsd < 0.01 ? row.estimatedCostUsd.toFixed(4) : row.estimatedCostUsd.toFixed(2)}
+                          </Badge>
+                        )}
                         <Badge size="xs" variant="light" color="iris">{row.runs} runs</Badge>
                         <Badge size="xs" variant="light" color={rate >= 90 ? "teal" : rate >= 70 ? "yellow" : "red"}>
                           {rate}% ok
@@ -216,10 +243,12 @@ function UsagePanel({ rpc, active }: { rpc: RpcCall | undefined; active: boolean
                     <Progress value={share} size={4} color="iris" mb={6} radius="xl" />
                     <Group gap="md" wrap="wrap">
                       <Text size="11px" c="dimmed" ff="monospace">
-                        Avg TTFT: {row.avgTtftMs !== undefined ? `${row.avgTtftMs} ms` : "—"}
+                        Avg TTFT: {row.avgTtftMs !== undefined
+                          ? row.avgTtftMs < 1000 ? `${row.avgTtftMs} ms` : `${(row.avgTtftMs / 1000).toFixed(1)} s`
+                          : "—"}
                       </Text>
                       <Text size="11px" c="dimmed" ff="monospace">
-                        In: {row.inputTokens.toLocaleString()} tok
+                        In: {row.inputTokens.toLocaleString()}{rowCachePct > 0 ? ` (${rowCachePct}% cached)` : ""}
                       </Text>
                       <Text size="11px" c="dimmed" ff="monospace">
                         Out: {row.outputTokens.toLocaleString()} tok
@@ -376,6 +405,10 @@ export function SettingsDialog({ controls, providers, rules, rpc, onRefresh, onR
                           : provider.models?.length
                             ? `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}${provider.defaultModel ? ` · default ${provider.defaultModel}` : ""}`
                             : provider.command}
+                        {provider.available && provider.supportedModes && provider.supportedModes.length > 1
+                          ? ` · ${provider.supportedModes.includes("agent") ? "Explore & Agent" : "Explore"}`
+                          : ""}
+                        {provider.available && provider.supportsPersistentSession ? " · Live session" : ""}
                       </small>
                     </div>
                     <Badge

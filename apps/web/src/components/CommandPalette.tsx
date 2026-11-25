@@ -3,14 +3,19 @@ import { Badge, Group, Kbd } from "@mantine/core";
 import { Spotlight, spotlight } from "@mantine/spotlight";
 import type { SpotlightActionData, SpotlightActionGroupData } from "@mantine/spotlight";
 import {
-  ArrowClockwise, BookOpen, Brain, Broadcast, ChartBar, ClockCounterClockwise, Columns, ColumnsPlusRight,
-  FileMagnifyingGlass, FolderOpen, GitBranch, Keyboard, MagnifyingGlass, NotePencil, PlugsConnected,
-  Scales, SlidersHorizontal, Sparkle, TerminalWindow,
+  ArrowClockwise, ArrowCounterClockwise, BookOpen, Brain, Broadcast, ChartBar, ClockCounterClockwise,
+  Columns, ColumnsPlusRight, Eye, FileMagnifyingGlass, FolderOpen, GitBranch, Keyboard, Lock,
+  MagnifyingGlass, NotePencil, Play, PlugsConnected, Scales, SlidersHorizontal, Sparkle,
+  TerminalWindow, Wrench,
 } from "@phosphor-icons/react";
+import type { ExecutionMode } from "@ide/protocol";
 import { useShallow } from "zustand/react/shallow";
 import { focusPaneInput, formatShortcut, isMac } from "../shortcuts";
 import { useWorkbench, useWorkbenchState } from "../workbenchContext";
-import { activeChatPane, paneDisplayTitle, providerForPane, resolveModel } from "../workbenchStore";
+import {
+  activeChatPane, paneDisplayTitle, providerForPane, resolveAccessMode, resolveModel,
+} from "../workbenchStore";
+import { ACCESS_MODE_META } from "./AccessModePicker";
 import { EFFORT_META, resolveSupportedEfforts } from "./EffortPicker";
 import { ProviderIcon } from "./ProviderIcon";
 
@@ -30,12 +35,18 @@ export function CommandPalette({
   onCheckForUpdates?: () => Promise<void>;
 }) {
   const workbench = useWorkbench();
-  const { dock, providers, chatPanes, activePane, activeProvider } = useWorkbenchState(useShallow((state) => {
+  const {
+    dock, providers, workspace, gitBranch, verifyPresets, checkpoints, chatPanes, activePane, activeProvider,
+  } = useWorkbenchState(useShallow((state) => {
     const active = activeChatPane(state.dock);
     const activeIndex = active ? state.dock.chatPanes.findIndex((entry) => entry.id === active.id) : -1;
     return {
       dock: state.dock,
       providers: state.providers,
+      workspace: state.workspace,
+      gitBranch: state.gitBranch,
+      verifyPresets: state.verifyPresets,
+      checkpoints: state.checkpoints,
       chatPanes: state.dock.chatPanes,
       activePane: active,
       activeProvider: active ? providerForPane(state.providers, active.config, activeIndex) : undefined,
@@ -128,6 +139,29 @@ export function CommandPalette({
       });
     }
 
+    if (activePane && activeProvider?.structured) {
+      const supportedModes = activeProvider.supportedModes ?? ["isolated"];
+      const currentMode = resolveAccessMode(activeProvider, activePane.config.accessMode, Boolean(workspace));
+      const modeActions: SpotlightActionData[] = (["isolated", "read-only", "agent"] as ExecutionMode[])
+        .filter((mode) => mode === "isolated" || (Boolean(workspace) && supportedModes.includes(mode)))
+        .map((mode) => ({
+          id: `access-mode-${mode}`,
+          label: `Access Mode: ${ACCESS_MODE_META[mode].label}`,
+          description: ACCESS_MODE_META[mode].hint,
+          keywords: ["mode", "access", mode, ACCESS_MODE_META[mode].label, "explore", "agent", "isolated"],
+          leftSection: mode === "agent"
+            ? <Wrench size={15} weight="duotone" color="var(--accent)" />
+            : mode === "read-only"
+              ? <Eye size={15} weight="duotone" color="var(--positive)" />
+              : <Lock size={15} weight="duotone" color="var(--muted)" />,
+          rightSection: currentMode === mode ? <Badge size="xs" variant="light" color="iris">Current</Badge> : undefined,
+          onClick: () => workbench.dock.configure(activePane.id, { accessMode: mode }),
+        }));
+      if (modeActions.length > 1) {
+        groups.push({ group: "Workspace Access Mode", actions: modeActions });
+      }
+    }
+
     const availableProviders = providers.filter((entry) => entry.available);
     if (activePane && availableProviders.length > 1) {
       groups.push({
@@ -175,10 +209,18 @@ export function CommandPalette({
         leftSection: <NotePencil size={15} weight="duotone" />,
         rightSection: <Kbd>{formatShortcut("new-conversation")}</Kbd>,
         onClick: () => {
-          workbench.dock.newConversation(activePane.id);
+          workbench.startNewConversation(activePane.id);
           requestAnimationFrame(() => focusPaneInput(activePane.id));
         },
       }] : []),
+      {
+        id: "toggle-search",
+        label: "Search across workspace",
+        description: "Full-text code search powered by ripgrep",
+        leftSection: <MagnifyingGlass size={15} weight="duotone" />,
+        rightSection: <Kbd>{formatShortcut("toggle-search")}</Kbd>,
+        onClick: () => workbench.openSearch(),
+      },
       {
         id: "toggle-broadcast",
         label: "Toggle Broadcast multi-model composer",
@@ -187,6 +229,29 @@ export function CommandPalette({
         rightSection: <Kbd>{formatShortcut("toggle-broadcast")}</Kbd>,
         onClick: () => workbench.toggleBroadcast(),
       },
+      ...(workspace && gitBranch ? [{
+        id: "toggle-arena",
+        label: "Toggle Worktree Arena",
+        description: "Run broadcast models in isolated parallel git worktrees",
+        leftSection: <GitBranch size={15} weight="duotone" color="var(--positive)" />,
+        onClick: () => workbench.toggleArena(),
+      }] : []),
+      ...verifyPresets.slice(0, 3).map((preset) => ({
+        id: `verify-${preset.id}`,
+        label: `Verify: ${preset.label}`,
+        description: preset.command,
+        keywords: ["verify", "test", "build", "lint", preset.label, preset.command],
+        leftSection: <Play size={15} weight="fill" color="var(--positive)" />,
+        onClick: () => void workbench.core.startVerify(preset.command),
+      })),
+      ...(checkpoints.length > 0 ? [{
+        id: "restore-checkpoint",
+        label: "Undo last agent turn (restore checkpoint)",
+        description: `Restore "${checkpoints[0].label}"`,
+        keywords: ["undo", "checkpoint", "rollback", "restore"],
+        leftSection: <ArrowCounterClockwise size={15} weight="bold" />,
+        onClick: () => void workbench.core.restoreCheckpoint(checkpoints[0].id),
+      }] : []),
       {
         id: "judge-broadcast",
         label: "Cross-review / Synthesize broadcast responses",
@@ -293,7 +358,10 @@ export function CommandPalette({
     ];
     groups.push({ group: "Actions", actions: actionItems });
     return groups;
-  }, [activePane, activeProvider, chatPanes, dock.activePaneId, onCheckForUpdates, onOpenQuickOpen, providers, workbench]);
+  }, [
+    activePane, activeProvider, chatPanes, checkpoints, dock.activePaneId, gitBranch,
+    onCheckForUpdates, onOpenQuickOpen, providers, verifyPresets, workbench, workspace,
+  ]);
 
   return (
     <Spotlight

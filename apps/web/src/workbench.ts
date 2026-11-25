@@ -3,6 +3,7 @@ import type {
 } from "@ide/protocol";
 import type { SettingsControls } from "./SettingsDialog";
 import { errorMessage } from "./bridge";
+import { parseAccessModeArg } from "./components/AccessModePicker";
 import { parseEffortArg, resolveSupportedEfforts } from "./components/EffortPicker";
 import { buildJudgePrompt, extractRunReplyText } from "./components/JudgeModal";
 import type { JudgePreset } from "./components/JudgeModal";
@@ -14,9 +15,9 @@ import { parseSlashInvocation } from "./slashCommands";
 import { readLatestTerminalOutput } from "./terminalBuffer";
 import {
   activeChatPane, conversationKey, createWorkbenchStore, hasBusyDestination,
-  isPaneBusy, providerForPane, resolveModel, routingTargets, utf8Bytes,
+  isPaneBusy, providerForPane, resolveAccessMode, resolveModel, routingTargets, utf8Bytes,
 } from "./workbenchStore";
-import type { ChatPane, SidebarView, WorkbenchState } from "./workbenchStore";
+import type { ChatPane, SidebarView } from "./workbenchStore";
 
 export function createWorkbench() {
   const store = createWorkbenchStore();
@@ -147,6 +148,16 @@ export function createWorkbench() {
       core.reportError("Open a project folder before previewing or applying code diffs.");
       return;
     }
+    if (request.multiFiles && request.multiFiles.length > 1) {
+      dock.openDiff({
+        mode: "apply",
+        path: request.multiFiles[0].path,
+        proposedCode: request.code,
+        language: request.language,
+        multiFiles: request.multiFiles,
+      });
+      return;
+    }
     const targetPath = request.suggestedPath ?? state.dock.filePath;
     if (!targetPath) {
       core.reportError("Open a target file in the editor (or include its path) to preview this diff.");
@@ -160,6 +171,110 @@ export function createWorkbench() {
     });
   }
 
+  function startNewConversation(paneId: string) {
+    const pane = store.getState().dock.chatPanes.find((entry) => entry.id === paneId);
+    if (pane?.config.conversationId) {
+      void core.closeConversationSession(pane.config.conversationId);
+    }
+    dock.newConversation(paneId);
+  }
+
+  function openSearch(query?: string) {
+    const trimmed = query?.trim();
+    store.setState((state) => ({
+      sidebar: "search",
+      searchQuerySeed: trimmed ? { query: trimmed, nonce: Date.now() } : state.searchQuerySeed,
+    }));
+  }
+
+  function runInTerminal(command: string) {
+    const trimmed = command.trim();
+    if (!trimmed) return;
+    store.setState({ pendingTerminalCommand: { command: trimmed, nonce: Date.now() } });
+    dock.openTool("terminal", "Terminal");
+  }
+
+  function sendVerifyFailureToAgent() {
+    const state = store.getState();
+    const verify = state.activeVerify;
+    if (!verify) return;
+    const label = `@verify (${verify.command})`;
+    const header = `Command: ${verify.command}\nStatus: ${verify.status} (exit ${verify.exitCode ?? "?"})\n\n`;
+    store.setState((current) => ({
+      attachments: [
+        ...current.attachments.filter((item) => !item.path.startsWith("@verify")),
+        { path: label, text: header + verify.output },
+      ],
+    }));
+    const target = getActiveChatPane();
+    if (target) {
+      dock.activate(target.id);
+      if (!(state.paneDrafts[target.id] ?? "").trim()) {
+        setPaneDraft(target.id, `Fix the failing check in ${label}.`);
+      }
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLTextAreaElement>(`textarea[data-pane-input="${CSS.escape(target.id)}"]`)?.focus();
+      });
+    }
+  }
+
+  async function generateCommitMessage(staged: boolean): Promise<string | null> {
+    const state = store.getState();
+    const { bridge, workspace, providers } = state;
+    if (!bridge || !workspace) {
+      core.reportError("Open a Git project folder first.");
+      return null;
+    }
+    const provider = providers.find((item) => item.available && item.structured);
+    if (!provider) {
+      core.reportError("No structured provider available to generate a commit message.");
+      return null;
+    }
+    core.reportError("");
+    try {
+      const diffResult = await bridge.rpc("git.diff", { staged, workspacePath: workspace.path });
+      if (!diffResult.diff.trim()) {
+        core.reportError(staged ? "No staged changes to summarize." : "No working tree changes to summarize.");
+        return null;
+      }
+      const started = await bridge.rpc("runs.start", {
+        workspacePath: workspace.path,
+        providerId: provider.id,
+        accessMode: "isolated",
+        mode: "manual",
+        prompt: [
+          "Write a concise Conventional Commit message summarizing the attached Git diff.",
+          "Return ONLY the commit message (single subject line <= 72 chars; optional brief bullet body only if multiple distinct changes).",
+          "No markdown fences, quotes, or commentary.",
+        ].join(" "),
+        attachments: [{ path: staged ? "@git-staged" : "@git-diff", text: diffResult.diff.slice(0, 60_000) }],
+      });
+      const deadline = Date.now() + 20_000;
+      let detail = await bridge.rpc("runs.get", { id: started.id });
+      while (detail.run.status === "running" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        detail = await bridge.rpc("runs.get", { id: started.id });
+      }
+      if (detail.run.status === "running") {
+        void bridge.rpc("runs.cancel", { id: started.id }).catch(() => {});
+        core.reportError("Timed out generating commit message.");
+        return null;
+      }
+      if (detail.run.status !== "succeeded") {
+        core.reportError(detail.run.error || "Commit message generation failed.");
+        return null;
+      }
+      const cleaned = extractRunReplyText(detail)
+        .replace(/^```[^\n]*\n?/, "")
+        .replace(/\n?```$/, "")
+        .trim();
+      return cleaned || null;
+    } catch (reason) {
+      core.reportError(errorMessage(reason));
+      return null;
+    }
+  }
+
   function executeSlashCommand(input: string, paneId?: string): boolean {
     const parsed = parseSlashInvocation(input);
     if (!parsed) return false;
@@ -171,7 +286,7 @@ export function createWorkbench() {
     core.reportError("");
     switch (command.name) {
       case "new":
-        if (target) dock.newConversation(target.id);
+        if (target) startNewConversation(target.id);
         return true;
       case "model": {
         if (!target) return true;
@@ -246,6 +361,68 @@ export function createWorkbench() {
         dock.configure(target.id, { providerId: found.id, model: undefined, effort: undefined, mode: found.structured ? "structured" : "terminal" });
         return true;
       }
+      case "mode": {
+        if (!target) return true;
+        const index = state.dock.chatPanes.findIndex((pane) => pane.id === target.id);
+        const provider = providerForPane(state.providers, target.config, index);
+        if (!arg) {
+          const trigger = document.querySelector<HTMLButtonElement>(`[data-mode-trigger="${CSS.escape(target.id)}"]`);
+          trigger?.click();
+          return true;
+        }
+        const parsedMode = parseAccessModeArg(arg);
+        if (!parsedMode) {
+          core.reportError(`Unknown mode "${arg}". Use isolated, explore (read-only), or agent.`);
+          return true;
+        }
+        if (parsedMode !== "isolated" && !state.workspace) {
+          core.reportError("Open a project folder before switching to Explore or Agent mode.");
+          return true;
+        }
+        const supported = provider?.supportedModes ?? ["isolated"];
+        if (!supported.includes(parsedMode)) {
+          core.reportError(`${provider?.name ?? "This provider"} only supports: ${supported.join(", ")}.`);
+          return true;
+        }
+        dock.configure(target.id, { accessMode: parsedMode });
+        return true;
+      }
+      case "arena": {
+        const lower = arg.trim().toLowerCase();
+        if (lower === "discard") {
+          if (state.activeArena) void core.discardArena(state.activeArena.id);
+          else core.reportError("No active Worktree Arena to discard.");
+          return true;
+        }
+        if (!state.workspace || !state.gitBranch) {
+          core.reportError("Open a Git repository folder to use Worktree Arena.");
+          return true;
+        }
+        const nextEnabled = lower === "on" ? true : lower === "off" ? false : !state.arenaEnabled;
+        store.setState({ arenaEnabled: nextEnabled, ...(nextEnabled ? { broadcast: true, broadcastCollapsed: false } : {}) });
+        return true;
+      }
+      case "search":
+        openSearch(arg);
+        return true;
+      case "verify": {
+        const cmd = arg.trim() || state.verifyPresets[0]?.command;
+        if (!cmd) {
+          core.reportError("No verify presets detected. Try /verify <command>.");
+          return true;
+        }
+        void core.startVerify(cmd);
+        return true;
+      }
+      case "undo": {
+        const candidate = state.checkpoints.find((cp) => !cp.restoredAt) ?? state.checkpoints[0];
+        if (!candidate) {
+          core.reportError("No saved checkpoints available to restore.");
+          return true;
+        }
+        void core.restoreCheckpoint(candidate.id);
+        return true;
+      }
       case "terminal":
         if (target) {
           dock.configure(target.id, { mode: target.config.mode === "terminal" ? "structured" : "terminal" });
@@ -305,7 +482,19 @@ export function createWorkbench() {
       recentWorkspaces,
       sidebar: "explorer",
       refreshKey: current.refreshKey + 1,
-      ...(changed ? { selection: null, contextPaths: [], contextSizes: {}, attachments: [], editorDrafts: new Map() } : {}),
+      ...(changed
+        ? {
+            selection: null,
+            contextPaths: [],
+            contextSizes: {},
+            attachments: [],
+            editorDrafts: new Map(),
+            activeVerify: null,
+            activeArena: null,
+            arenaEnabled: false,
+            searchQuerySeed: null,
+          }
+        : {}),
     }));
     void core.refreshWorkspaceMetadata(project.path);
   }
@@ -476,12 +665,17 @@ export function createWorkbench() {
       const model = resolveModel(provider, pane.config.model);
       const supported = resolveSupportedEfforts(provider, model);
       const effort = pane.config.effort && supported.includes(pane.config.effort) ? pane.config.effort : undefined;
+      const accessMode = resolveAccessMode(provider, pane.config.accessMode, Boolean(root));
       const request: RunInput = {
         conversationId: pane.config.conversationId,
         workspacePath: root,
         providerId: provider.id,
         model,
         effort,
+        accessMode,
+        includeWorkspaceMap: root && state.includeWorkspaceMap ? true : undefined,
+        activeFilePath: root ? state.dock.filePath : undefined,
+        createCheckpoint: root && accessMode === "agent" ? true : undefined,
         includeProjectRules: includeProjectRules && projectRules.length > 0 ? true : undefined,
         prompt,
         contextPaths,
@@ -515,6 +709,7 @@ export function createWorkbench() {
     const {
       bridge, choosingProject, submitting, composer, contextPaths, attachments, selection, tags,
       fallbackIds, template, routing, broadcast, broadcastTargets, includeProjectRules, projectRules,
+      includeWorkspaceMap, arenaEnabled, gitBranch,
     } = state;
     const prompt = composer.trim();
     if (!prompt) return;
@@ -528,25 +723,60 @@ export function createWorkbench() {
     if (!bridge || choosingProject || submitting || !destinations.length || hasBusyDestination(state, destinations)) return;
     const destIds = destinations.map((pane) => pane.id);
     const broadcastGroupId = useBroadcast && destinations.length > 1 ? crypto.randomUUID() : undefined;
+    const root = state.workspace?.path ?? null;
+    const useArena = Boolean(useBroadcast && arenaEnabled && root && gitBranch && destinations.length >= 2);
     store.setState((current) => ({
       submitting: true,
       error: "",
       submittingPanes: [...new Set([...current.submittingPanes, ...destIds])],
     }));
     if (!useBroadcast) dock.activate(destinations[0].id);
-    const root = state.workspace?.path ?? null;
     const startedRunIds: string[] = [];
     try {
+      let activeArenaId: string | undefined;
+      let slotByPane = new Map<string, string>();
+      if (useArena && root) {
+        try {
+          const arena = await bridge.rpc("arena.create", {
+            workspacePath: root,
+            prompt,
+            includeDirty: true,
+            slots: destinations.map(({ id, config, provider }) => {
+              const model = resolveModel(provider, config.model);
+              const supported = resolveSupportedEfforts(provider, model);
+              const effort = config.effort && supported.includes(config.effort) ? config.effort : undefined;
+              return { paneId: id, providerId: provider.id, providerName: provider.name, model, effort };
+            }),
+          });
+          activeArenaId = arena.id;
+          slotByPane = new Map(arena.slots.map((slot) => [slot.paneId, slot.id]));
+          store.setState({ activeArena: arena });
+        } catch (reason) {
+          core.reportError(`Worktree Arena: ${errorMessage(reason)}`);
+          return;
+        }
+      }
+
       const outcomes = await Promise.allSettled(destinations.map(async ({ id, config, provider }) => {
         const model = resolveModel(provider, config.model);
         const supported = resolveSupportedEfforts(provider, model);
         const effort = config.effort && supported.includes(config.effort) ? config.effort : undefined;
+        const arenaSlotId = slotByPane.get(id);
+        const accessMode = activeArenaId && arenaSlotId
+          ? ((provider.supportedModes ?? ["isolated"]).includes("agent") ? "agent" : resolveAccessMode(provider, config.accessMode, Boolean(root)))
+          : resolveAccessMode(provider, config.accessMode, Boolean(root));
         const request: RunInput = {
           conversationId: config.conversationId,
           workspacePath: root,
           providerId: provider.id,
           model,
           effort,
+          accessMode,
+          includeWorkspaceMap: root && includeWorkspaceMap ? true : undefined,
+          activeFilePath: root ? state.dock.filePath : undefined,
+          createCheckpoint: !activeArenaId && root && accessMode === "agent" ? true : undefined,
+          arenaId: activeArenaId,
+          arenaSlotId,
           broadcastGroupId,
           includeProjectRules: includeProjectRules && projectRules.length > 0 ? true : undefined,
           prompt,
@@ -574,6 +804,7 @@ export function createWorkbench() {
             : {}),
         }));
       }
+      if (activeArenaId) void core.refreshActiveArena(activeArenaId);
       if (failures.length) core.reportError(failures.join(" · "));
     } finally {
       store.setState((current) => ({
@@ -583,31 +814,69 @@ export function createWorkbench() {
     }
   }
 
-  async function runJudge(options: { providerId: string; model?: string; effort?: EffortLevel; preset: JudgePreset }) {
+  async function runJudge(options: {
+    providerId: string;
+    model?: string;
+    effort?: EffortLevel;
+    preset: JudgePreset;
+    useArenaPatches?: boolean;
+  }) {
     const state = store.getState();
     const { bridge } = state;
     if (!bridge) return;
-    const candidates = state.lastBroadcastRunIds
-      .map((id) => state.details[id])
-      .filter((detail): detail is NonNullable<typeof detail> => Boolean(detail && detail.run.status === "succeeded"));
-    if (candidates.length < 2) {
-      core.reportError("Need at least 2 completed broadcast responses to run cross-model review.");
-      return;
+    let judgePrompt = "";
+    if (options.useArenaPatches && state.activeArena) {
+      const arena = state.activeArena;
+      const changedSlots = arena.slots.filter((slot) => slot.filesChanged > 0);
+      if (changedSlots.length < 2) {
+        core.reportError("Need at least 2 Worktree Arena slots with code changes to cross-review patches.");
+        return;
+      }
+      const entries = await Promise.all(changedSlots.map(async (slot) => {
+        let diff = "";
+        try {
+          const res = await bridge.rpc("arena.slotDiff", { arenaId: arena.id, slotId: slot.id });
+          diff = res.diff;
+        } catch {
+          diff = "";
+        }
+        const detail = slot.runId ? state.details[slot.runId] : undefined;
+        const verifySummary = slot.verify && slot.verify.status !== "idle"
+          ? `\`${slot.verify.command}\` → ${slot.verify.status}${slot.verify.exitCode !== undefined && slot.verify.exitCode !== null ? ` (exit ${slot.verify.exitCode})` : ""}`
+          : undefined;
+        return {
+          label: `${slot.providerName}${slot.model ? ` (${slot.model})` : ""} · ${slot.filesChanged} files (+${slot.additions}/-${slot.deletions})`,
+          text: detail ? extractRunReplyText(detail) : "",
+          diff,
+          verifySummary,
+        };
+      }));
+      judgePrompt = buildJudgePrompt(options.preset, arena.prompt, entries);
+    } else {
+      const candidates = state.lastBroadcastRunIds
+        .map((id) => state.details[id])
+        .filter((detail): detail is NonNullable<typeof detail> => Boolean(detail && detail.run.status === "succeeded"));
+      if (candidates.length < 2) {
+        core.reportError("Need at least 2 completed broadcast responses to run cross-model review.");
+        return;
+      }
+      judgePrompt = buildJudgePrompt(
+        options.preset,
+        candidates[0].run.prompt,
+        candidates.map((detail) => ({
+          label: `${detail.run.providerName ?? detail.run.providerId}${detail.run.model ? ` (${detail.run.model})` : ""}`,
+          text: extractRunReplyText(detail),
+        })),
+      );
     }
-    const originalPrompt = candidates[0].run.prompt;
-    const judgePrompt = buildJudgePrompt(
-      options.preset,
-      originalPrompt,
-      candidates.map((detail) => ({
-        label: `${detail.run.providerName ?? detail.run.providerId}${detail.run.model ? ` (${detail.run.model})` : ""}`,
-        text: extractRunReplyText(detail),
-      })),
-    );
 
+    const judgeProvider = state.providers.find((provider) => provider.id === options.providerId);
+    const preferredMode = resolveAccessMode(judgeProvider, "read-only", Boolean(state.workspace));
     const newPaneId = dock.newSplit({
       providerId: options.providerId,
       model: options.model,
       effort: options.effort,
+      accessMode: preferredMode,
       mode: "structured",
     });
     if (!newPaneId) return;
@@ -618,6 +887,7 @@ export function createWorkbench() {
     store, core, dock, settings, projectConfirm, judgeDialog,
     pickProject, openHistory, resumeConversation, forkConversationToSplit,
     applyPrompt, sendPrompt, sendToPane, runJudge, setPaneDraft, executeSlashCommand,
+    startNewConversation, openSearch, runInTerminal, sendVerifyFailureToAgent, generateCommitMessage,
     activeRunIdForPane, activeChatPane: getActiveChatPane,
     toggleContext, attachFile, attachGitDiff, attachTerminal, removeAttachment,
     openExternalUrl, previewDiffFromCode,
@@ -634,6 +904,11 @@ export function createWorkbench() {
     }),
     toggleBroadcastCollapsed: () => store.setState((state) => ({ broadcastCollapsed: !state.broadcastCollapsed })),
     toggleProjectRules: () => store.setState((state) => ({ includeProjectRules: !state.includeProjectRules })),
+    toggleWorkspaceMap: () => store.setState((state) => ({ includeWorkspaceMap: !state.includeWorkspaceMap })),
+    toggleArena: () => store.setState((state) => ({
+      arenaEnabled: !state.arenaEnabled,
+      ...(!state.arenaEnabled ? { broadcast: true, broadcastCollapsed: false } : {}),
+    })),
     toggleBroadcastTarget: (paneId: string) => store.setState((state) => {
       const current = state.broadcastTargets;
       if (!current.length) {

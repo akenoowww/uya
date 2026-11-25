@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Group, Modal, SegmentedControl, Select, Stack, Text } from "@mantine/core";
-import { Scales } from "@phosphor-icons/react";
-import type { EffortLevel, Provider, RunDetail } from "@ide/protocol";
+import { GitBranch, Scales } from "@phosphor-icons/react";
+import type { ArenaSummary, EffortLevel, Provider, RunDetail } from "@ide/protocol";
 import { EFFORT_META, resolveSupportedEfforts } from "./EffortPicker";
 
 export type JudgePreset = "review" | "synthesize" | "pick-winner";
@@ -48,7 +48,7 @@ const MAX_JUDGE_PROMPT_CHARS = 220_000;
 export function buildJudgePrompt(
   preset: JudgePreset,
   originalPrompt: string,
-  candidates: Array<{ label: string; text: string }>,
+  candidates: Array<{ label: string; text: string; diff?: string; verifySummary?: string }>,
 ): string {
   const instruction = PRESET_PROMPTS[preset].instruction;
   const boundedOriginal = originalPrompt.length > 40_000
@@ -56,17 +56,22 @@ export function buildJudgePrompt(
     : originalPrompt;
   const remaining = Math.max(4_000, MAX_JUDGE_PROMPT_CHARS - instruction.length - boundedOriginal.length - 512);
   const perCandidateLimit = Math.max(1_000, Math.floor(remaining / Math.max(1, candidates.length)));
-  const sections = candidates.map(({ label, text }, index) => {
-    const body = text.length > perCandidateLimit
-      ? `${text.slice(0, perCandidateLimit)}\n[...truncated for review budget...]`
-      : text;
+  const sections = candidates.map(({ label, text, diff, verifySummary }, index) => {
+    const parts: string[] = [];
+    if (verifySummary) parts.push(`**Verification:** ${verifySummary}`);
+    if (diff?.trim()) parts.push(`#### Unified Git Diff\n\`\`\`diff\n${diff.trim()}\n\`\`\``);
+    if (text.trim()) parts.push(`#### Agent Summary\n${text.trim()}`);
+    const combined = parts.join("\n\n");
+    const body = combined.length > perCandidateLimit
+      ? `${combined.slice(0, perCandidateLimit)}\n[...truncated for review budget...]`
+      : combined;
     return `### Candidate ${index + 1}: ${label}\n${body}`;
   });
   return [
     instruction,
     "## Original Request",
     boundedOriginal,
-    "## Candidate Responses",
+    "## Candidates",
     ...sections,
   ].join("\n\n");
 }
@@ -76,15 +81,17 @@ interface Props {
   onClose: () => void;
   providers: Provider[];
   candidates: RunDetail[];
+  arena?: ArenaSummary | null;
   onRunJudge: (options: {
     providerId: string;
     model?: string;
     effort?: EffortLevel;
     preset: JudgePreset;
+    useArenaPatches?: boolean;
   }) => void;
 }
 
-export function JudgeModal({ opened, onClose, providers, candidates, onRunJudge }: Props) {
+export function JudgeModal({ opened, onClose, providers, candidates, arena, onRunJudge }: Props) {
   const structured = useMemo(
     () => providers.filter((provider) => provider.available && provider.structured),
     [providers],
@@ -94,25 +101,43 @@ export function JudgeModal({ opened, onClose, providers, candidates, onRunJudge 
   const [effort, setEffort] = useState<string>("auto");
   const [preset, setPreset] = useState<JudgePreset>("review");
 
+  const arenaPatchSlots = (arena?.slots ?? []).filter((slot) => slot.filesChanged > 0);
+  const useArenaPatches = arenaPatchSlots.length >= 2;
+  const candidateCount = useArenaPatches ? arenaPatchSlots.length : candidates.length;
+
   const activeProvider = structured.find((provider) => provider.id === providerId) ?? structured[0];
   const models = activeProvider?.models ?? [];
   const resolvedModel = model || (activeProvider?.kind === "runtime" ? models[0] : undefined);
   const efforts = resolveSupportedEfforts(activeProvider, resolvedModel);
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Cross-Model Review & Synthesis" size={480}>
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={useArenaPatches ? "Cross-Review Arena Patches" : "Cross-Model Review & Synthesis"}
+      size={480}
+    >
       <Stack gap="sm">
         <Text size="xs" c="dimmed">
-          Send {candidates.length} broadcast responses to an arbiter model to verify claims, catch hidden bugs, or synthesize one unified answer.
+          {useArenaPatches
+            ? `Send ${arenaPatchSlots.length} isolated worktree patches and verification results to an arbiter model to find regressions, rank quality, or synthesize the strongest patch.`
+            : `Send ${candidates.length} broadcast responses to an arbiter model to verify claims, catch hidden bugs, or synthesize one unified answer.`}
         </Text>
 
         <Group gap={6} wrap="wrap">
-          {candidates.map((detail) => (
-            <Badge key={detail.run.id} size="xs" variant="light" color="iris">
-              {detail.run.providerName ?? detail.run.providerId}
-              {detail.run.model ? ` · ${detail.run.model.split("/").at(-1)}` : ""}
-            </Badge>
-          ))}
+          {useArenaPatches
+            ? arenaPatchSlots.map((slot) => (
+              <Badge key={slot.id} size="xs" variant="light" color="teal" leftSection={<GitBranch size={10} />}>
+                {slot.providerName} · {slot.filesChanged}f (+{slot.additions}/-{slot.deletions})
+                {slot.verify?.status === "passed" ? " · ✓" : slot.verify?.status === "failed" ? " · ✗" : ""}
+              </Badge>
+            ))
+            : candidates.map((detail) => (
+              <Badge key={detail.run.id} size="xs" variant="light" color="iris">
+                {detail.run.providerName ?? detail.run.providerId}
+                {detail.run.model ? ` · ${detail.run.model.split("/").at(-1)}` : ""}
+              </Badge>
+            ))}
         </Group>
 
         <div>
@@ -173,7 +198,7 @@ export function JudgeModal({ opened, onClose, providers, candidates, onRunJudge 
           <Button variant="default" onClick={onClose}>Cancel</Button>
           <Button
             color="iris"
-            disabled={!activeProvider || candidates.length < 2}
+            disabled={!activeProvider || candidateCount < 2}
             leftSection={<Scales size={14} weight="duotone" />}
             onClick={() => {
               if (!activeProvider) return;
@@ -182,6 +207,7 @@ export function JudgeModal({ opened, onClose, providers, candidates, onRunJudge 
                 model: resolvedModel,
                 effort: effort === "auto" ? undefined : (effort as EffortLevel),
                 preset,
+                useArenaPatches,
               });
               onClose();
             }}

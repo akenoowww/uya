@@ -1,7 +1,8 @@
 import { createStore } from "zustand/vanilla";
 import type {
-  ConversationSummary, EditorSelection, EffortLevel, ProjectRuleFile, Provider,
-  RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail, RunSummary, TextContext, WorkspaceInfo,
+  ArenaSummary, CheckpointSummary, ConversationSummary, EditorSelection, EffortLevel, ExecutionMode,
+  ProjectRuleFile, Provider, RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail, RunSummary,
+  TextContext, VerifyPreset, VerifyRun, WorkspaceInfo,
 } from "@ide/protocol";
 import type { Bridge } from "./bridge";
 import type { EditorDrafts } from "./editorDrafts";
@@ -11,6 +12,7 @@ export interface PaneConfig {
   providerId?: string;
   model?: string;
   effort?: EffortLevel;
+  accessMode?: ExecutionMode;
   mode?: "structured" | "terminal";
 }
 
@@ -27,7 +29,7 @@ export interface DockSnapshot {
   filePath?: string;
 }
 
-export type SidebarView = "explorer" | "git" | "history" | null;
+export type SidebarView = "explorer" | "search" | "git" | "history" | null;
 
 export const MAX_CONTEXT_BYTES = 256 * 1024;
 
@@ -43,6 +45,14 @@ export interface WorkbenchState {
   gitChangeCount: number;
   projectRules: ProjectRuleFile[];
   includeProjectRules: boolean;
+  includeWorkspaceMap: boolean;
+  checkpoints: CheckpointSummary[];
+  verifyPresets: VerifyPreset[];
+  activeVerify: VerifyRun | null;
+  arenaEnabled: boolean;
+  activeArena: ArenaSummary | null;
+  pendingTerminalCommand: { command: string; nonce: number } | null;
+  searchQuerySeed: { query: string; nonce: number } | null;
   editorDrafts: EditorDrafts;
   choosingProject: boolean;
   refreshKey: number;
@@ -86,6 +96,14 @@ export function createWorkbenchStore() {
     gitChangeCount: 0,
     projectRules: [],
     includeProjectRules: true,
+    includeWorkspaceMap: true,
+    checkpoints: [],
+    verifyPresets: [],
+    activeVerify: null,
+    arenaEnabled: false,
+    activeArena: null,
+    pendingTerminalCommand: null,
+    searchQuerySeed: null,
     editorDrafts: new Map(),
     choosingProject: false,
     refreshKey: 0,
@@ -146,9 +164,25 @@ export function resolveModel(provider: Provider | undefined, configuredModel: st
   return trimmed;
 }
 
+export function resolveAccessMode(
+  provider: Provider | undefined,
+  configuredMode: ExecutionMode | undefined,
+  hasWorkspace: boolean,
+): ExecutionMode {
+  if (!hasWorkspace) return "isolated";
+  const supported = provider?.supportedModes ?? ["isolated"];
+  if (configuredMode && supported.includes(configuredMode)) return configuredMode;
+  if (supported.includes("read-only")) return "read-only";
+  return "isolated";
+}
+
 export function shortModelName(model: string | undefined): string {
   if (!model) return "";
   return model.includes("/") ? model.split("/").at(-1) ?? model : model;
+}
+
+export function formatDurationCompact(milliseconds: number): string {
+  return milliseconds < 1000 ? `${Math.round(milliseconds)} ms` : `${(milliseconds / 1000).toFixed(1)} s`;
 }
 
 export function paneDisplayTitle(provider: Provider | undefined, config: PaneConfig, index: number): string {

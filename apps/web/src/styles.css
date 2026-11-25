@@ -10,6 +10,7 @@
   --quiet: #7d8294;
   --line: #272933;
   --positive: #7dd1a4;
+  --warning: #e5c07b;
   --danger: #e99a9e;
   --chrome: #17181d;
   --font-label: 12px;
@@ -476,6 +477,64 @@ svg { flex-shrink: 0; }
   font-size: 12px;
 }
 .shortcut-row:last-child { border-bottom: 0; }
+
+/* Agentic Workbench: Tool Cards, Approvals, Checkpoints, Welcome, Verify & Arena */
+.tool-card {
+  border-color: #292c37;
+}
+.approval-card {
+  background: rgba(229, 192, 123, 0.06);
+  border-color: rgba(229, 192, 123, 0.35);
+}
+.approval-detail {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #121319;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 11px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 120px;
+  overflow: auto;
+}
+.checkpoint-banner {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.welcome-card {
+  border-color: var(--border);
+}
+.arena-bar {
+  background: #1a1d24;
+  border-color: rgba(125, 209, 164, 0.28);
+}
+.arena-slots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 6px;
+}
+.arena-slot-card {
+  border-color: var(--line);
+}
+.verify-output {
+  margin: 0;
+  padding: 8px;
+  border-radius: 5px;
+  background: #121318;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 11px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
 @media (max-width: 900px) {
   .activity-rail { flex-basis: 42px; }

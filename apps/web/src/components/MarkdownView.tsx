@@ -4,14 +4,16 @@ import { Button, Group } from "@mantine/core";
 import { useClipboard } from "@mantine/hooks";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowSquareOut, Check, Copy, GitDiff } from "@phosphor-icons/react";
+import { ArrowSquareOut, Check, Copy, GitDiff, TerminalWindow } from "@phosphor-icons/react";
 import { highlightCode } from "../codeHighlight";
-import { extractTargetPath } from "../patchApply";
+import { extractTargetPath, isShellLanguage, isUnifiedDiff, parseMultiFileUnifiedDiff } from "../patchApply";
+import type { MultiFilePatchEntry } from "../patchApply";
 
 export interface ApplyPreviewRequest {
   code: string;
   language?: string;
   suggestedPath?: string;
+  multiFiles?: MultiFilePatchEntry[];
 }
 
 const FILE_REF_PATTERN = /^([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+)(?::(\d+))?$/;
@@ -36,9 +38,11 @@ function isSafeHttpUrl(href: string | undefined): href is string {
 function CodeBlock({
   children,
   onPreviewDiff,
+  onRunCommand,
 }: {
   children?: ReactNode;
   onPreviewDiff?: (request: ApplyPreviewRequest) => void;
+  onRunCommand?: (command: string) => void;
 }) {
   const clipboard = useClipboard({ timeout: 1600 });
   const child = isValidElement<{ className?: string; children?: ReactNode }>(children) ? children : null;
@@ -55,23 +59,48 @@ function CodeBlock({
     return () => { active = false; };
   }, [language, rawCode]);
 
-  const suggestedPath = extractTargetPath(language, rawCode);
+  const shellBlock = isShellLanguage(language);
+  const multiFiles = !shellBlock && isUnifiedDiff(language, rawCode) ? parseMultiFileUnifiedDiff(rawCode) : [];
+  const suggestedPath = multiFiles[0]?.path ?? extractTargetPath(language, rawCode);
 
   return (
     <div className="code-block">
       <div className="code-block-header">
-        <span className="code-block-lang">{suggestedPath ? `${language ?? "code"} · ${suggestedPath}` : language ?? "code"}</span>
+        <span className="code-block-lang">
+          {multiFiles.length > 1
+            ? `${language ?? "diff"} · ${multiFiles.length} files`
+            : suggestedPath
+              ? `${language ?? "code"} · ${suggestedPath}`
+              : language ?? "code"}
+        </span>
         <Group gap={4} wrap="nowrap">
-          {onPreviewDiff && rawCode.trim().length > 0 && (
+          {shellBlock && onRunCommand && rawCode.trim().length > 0 && (
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              color="teal"
+              leftSection={<TerminalWindow size={12} weight="duotone" />}
+              onClick={() => onRunCommand(rawCode.trim())}
+              aria-label="Run shell command in terminal"
+            >
+              Run in Terminal
+            </Button>
+          )}
+          {!shellBlock && onPreviewDiff && rawCode.trim().length > 0 && (
             <Button
               size="compact-xs"
               variant="subtle"
               color="iris"
               leftSection={<GitDiff size={12} weight="duotone" />}
-              onClick={() => onPreviewDiff({ code: rawCode, language, suggestedPath })}
-              aria-label="Preview diff and apply code block"
+              onClick={() => onPreviewDiff({
+                code: rawCode,
+                language,
+                suggestedPath,
+                ...(multiFiles.length > 1 ? { multiFiles } : {}),
+              })}
+              aria-label={multiFiles.length > 1 ? `Preview diff and apply ${multiFiles.length} files` : "Preview diff and apply code block"}
             >
-              Diff / Apply
+              {multiFiles.length > 1 ? `Diff / Apply (${multiFiles.length})` : "Diff / Apply"}
             </Button>
           )}
           <Button
@@ -100,11 +129,13 @@ export function MarkdownView({
   onOpenUrl,
   onOpenFile,
   onPreviewDiff,
+  onRunCommand,
 }: {
   text: string;
   onOpenUrl?: (url: string) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onPreviewDiff?: (request: ApplyPreviewRequest) => void;
+  onRunCommand?: (command: string) => void;
 }) {
   return (
     <div className="markdown">
@@ -148,7 +179,9 @@ export function MarkdownView({
             }
             return <code className={className} {...rest}>{children}</code>;
           },
-          pre: ({ children }) => <CodeBlock onPreviewDiff={onPreviewDiff}>{children}</CodeBlock>,
+          pre: ({ children }) => (
+            <CodeBlock onPreviewDiff={onPreviewDiff} onRunCommand={onRunCommand}>{children}</CodeBlock>
+          ),
         }}
       >
         {text}

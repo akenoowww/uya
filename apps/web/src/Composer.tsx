@@ -3,10 +3,12 @@ import {
   ActionIcon, Alert, Badge, Button, Checkbox, Code, Group, Kbd, Menu, Paper, Pill, Progress, Select, Text, TextInput,
 } from "@mantine/core";
 import {
-  ArrowUp, BookOpen, Broadcast, CaretDown, CaretUp, Files, GitDiff, GitFork, Paperclip, Scales, Scroll, TerminalWindow,
+  ArrowUp, BookOpen, Broadcast, CaretDown, CaretUp, Files, GitBranch, GitDiff, GitFork, Paperclip,
+  Scales, Scroll, TerminalWindow, TreeStructure,
 } from "@phosphor-icons/react";
 import type { RoutingMode } from "@ide/protocol";
 import { useShallow } from "zustand/react/shallow";
+import { ArenaBar } from "./components/ArenaBar";
 import { MentionMenu } from "./components/MentionMenu";
 import { ProviderIcon } from "./components/ProviderIcon";
 import { SlashMenu } from "./components/SlashMenu";
@@ -15,7 +17,8 @@ import { useSlashInput } from "./hooks/useSlashInput";
 import { formatShortcut } from "./shortcuts";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
 import {
-  estimateContextBudget, hasBusyDestination, resolveModel, routingTargets, shortModelName, workspaceLabel,
+  estimateContextBudget, formatDurationCompact, hasBusyDestination, resolveModel, routingTargets,
+  shortModelName, workspaceLabel,
 } from "./workbenchStore";
 
 function formatKiB(bytes: number): string {
@@ -26,21 +29,22 @@ function formatKiB(bytes: number): string {
 export function Composer() {
   const workbench = useWorkbench();
   const {
-    store, sendPrompt, toggleContext, attachFile, attachGitDiff, attachTerminal, removeAttachment,
-    toggleProjectRules, retryConnection, core, toggleBroadcastCollapsed, toggleBroadcastTarget,
-    selectAllBroadcastTargets, judgeDialog,
+    store, dock: dockLayout, sendPrompt, toggleContext, attachFile, attachGitDiff, attachTerminal,
+    removeAttachment, toggleProjectRules, toggleWorkspaceMap, toggleArena, retryConnection, core,
+    toggleBroadcastCollapsed, toggleBroadcastTarget, selectAllBroadcastTargets, judgeDialog,
   } = workbench;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [cursor, setCursor] = useState(0);
 
   const {
-    bridge, workspace, providers, dock, broadcast, broadcastCollapsed, broadcastTargets,
+    bridge, workspace, gitBranch, providers, dock, broadcast, broadcastCollapsed, broadcastTargets,
     lastBroadcastRunIds, details, routing, tags, fallbackIds, contextPaths, contextSizes,
-    attachments, selection, projectRules, includeProjectRules, template, composer,
-    choosing, submitting, connectionError, error,
+    attachments, selection, projectRules, includeProjectRules, includeWorkspaceMap, arenaEnabled,
+    activeArena, verifyPresets, template, composer, choosing, submitting, connectionError, error,
   } = useWorkbenchState(useShallow((state) => ({
     bridge: state.bridge,
     workspace: state.workspace,
+    gitBranch: state.gitBranch,
     providers: state.providers,
     dock: state.dock,
     broadcast: state.broadcast,
@@ -57,6 +61,10 @@ export function Composer() {
     selection: state.selection,
     projectRules: state.projectRules,
     includeProjectRules: state.includeProjectRules,
+    includeWorkspaceMap: state.includeWorkspaceMap,
+    arenaEnabled: state.arenaEnabled,
+    activeArena: state.activeArena,
+    verifyPresets: state.verifyPresets,
     template: state.template,
     composer: state.composer,
     choosing: state.choosingProject,
@@ -145,9 +153,20 @@ export function Composer() {
         >
           Latest terminal output
         </Menu.Item>
-        {projectRules.length > 0 && (
+        {workspace && (
           <>
             <Menu.Divider />
+            <Menu.Item
+              leftSection={<TreeStructure size={13} color={includeWorkspaceMap ? "var(--positive)" : "var(--muted)"} />}
+              onClick={toggleWorkspaceMap}
+            >
+              {includeWorkspaceMap ? "Disable" : "Enable"} workspace file map
+            </Menu.Item>
+          </>
+        )}
+        {projectRules.length > 0 && (
+          <>
+            {!workspace && <Menu.Divider />}
             <Menu.Item
               leftSection={<Scroll size={13} />}
               onClick={toggleProjectRules}
@@ -268,6 +287,22 @@ export function Composer() {
         </Alert>
       )}
 
+      {activeArena && activeArena.status === "active" && (
+        <ArenaBar
+          arena={activeArena}
+          verifyPresets={verifyPresets}
+          onInspectFile={(arenaId, slotId, path, label) => {
+            dockLayout.openDiff({ mode: "arena", arenaId, arenaSlotId: slotId, arenaLabel: label, path });
+          }}
+          onVerifySlot={(arenaId, slotId, command) => {
+            void core.startVerify(command, { arenaId, arenaSlotId: slotId });
+          }}
+          onApplySlot={core.applyArenaSlot}
+          onDiscard={core.discardArena}
+          onJudgePatches={() => judgeDialog.current?.()}
+        />
+      )}
+
       {completedBroadcast.length >= 2 && (
         <Paper p="5px 8px" mb={6} withBorder radius="sm" className="broadcast-summary-bar">
           <Group justify="space-between" gap="xs" wrap="wrap">
@@ -284,8 +319,8 @@ export function Composer() {
                     styles={{ label: { fontWeight: 500, textTransform: "none" } }}
                   >
                     {detail.run.providerName ?? detail.run.providerId}
-                    {detail.run.ttftMs !== undefined ? ` · ${detail.run.ttftMs}ms` : ""}
-                    {ms > 0 ? ` / ${(ms / 1000).toFixed(1)}s` : ""}
+                    {detail.run.ttftMs !== undefined ? ` · ${formatDurationCompact(detail.run.ttftMs)}` : ""}
+                    {ms > 0 ? ` / ${formatDurationCompact(ms)}` : ""}
                     {detail.run.outputTokens !== undefined ? ` · ${detail.run.outputTokens}t` : ""}
                   </Badge>
                 );
@@ -378,6 +413,24 @@ export function Composer() {
                 >
                   Routed
                 </Button>
+                {useBroadcast && targets.length >= 2 && (
+                  <Button
+                    size="compact-xs"
+                    radius="xl"
+                    variant={arenaEnabled && workspace && gitBranch ? "light" : "default"}
+                    color={arenaEnabled && workspace && gitBranch ? "teal" : "gray"}
+                    disabled={!workspace || !gitBranch}
+                    leftSection={<GitBranch size={12} weight="duotone" />}
+                    title={
+                      workspace && gitBranch
+                        ? "Worktree Arena: run each model in its own isolated git worktree, verify diffs, and apply the winner"
+                        : "Open a Git repository to enable Worktree Arena"
+                    }
+                    onClick={toggleArena}
+                  >
+                    Worktree Arena
+                  </Button>
+                )}
                 <span className="toolbar-spacer" />
                 <ActionIcon
                   size="xs"
@@ -408,9 +461,11 @@ export function Composer() {
                   onClick={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
                   onKeyUp={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
                   placeholder={
-                    useBroadcast
-                      ? `Broadcast to ${destinations.length} splits… (@ context, / commands, ↵ send)`
-                      : `Send routed prompt to ${selected?.provider.name ?? "selected split"}… (@ context, ↵ send)`
+                    useBroadcast && arenaEnabled && workspace && gitBranch && destinations.length >= 2
+                      ? `Launch Worktree Arena across ${destinations.length} isolated branches… (@ context, ↵ send)`
+                      : useBroadcast
+                        ? `Broadcast to ${destinations.length} splits… (@ context, / commands, ↵ send)`
+                        : `Send routed prompt to ${selected?.provider.name ?? "selected split"}… (@ context, ↵ send)`
                   }
                   onKeyDown={(event) => {
                     if (mentionInput.handleMentionKeyDown(event)) return;
@@ -474,20 +529,26 @@ export function Composer() {
                 <Text size="11px" c="dimmed" truncate="end" className="composer-target">
                   {destinationBusy
                     ? "Waiting for current turn"
-                    : useBroadcast
-                      ? `${destinations.length} structured ${destinations.length === 1 ? "split" : "splits"}`
-                      : selected?.provider.name ?? "No structured provider"}
+                    : useBroadcast && arenaEnabled && workspace && gitBranch && destinations.length >= 2
+                      ? `${destinations.length} isolated git worktrees`
+                      : useBroadcast
+                        ? `${destinations.length} structured ${destinations.length === 1 ? "split" : "splits"}`
+                        : selected?.provider.name ?? "No structured provider"}
                 </Text>
                 <Button
                   type="submit"
                   size="compact-xs"
-                  color="iris"
+                  color={useBroadcast && arenaEnabled && workspace && gitBranch && destinations.length >= 2 ? "teal" : "iris"}
                   variant="filled"
                   className="send-primary-btn"
                   leftSection={<ArrowUp size={13} weight="bold" />}
                   disabled={!canSend}
                 >
-                  {useBroadcast ? `Broadcast (${destinations.length})` : "Send"}
+                  {useBroadcast && arenaEnabled && workspace && gitBranch && destinations.length >= 2
+                    ? `Arena (${destinations.length})`
+                    : useBroadcast
+                      ? `Broadcast (${destinations.length})`
+                      : "Send"}
                 </Button>
               </Group>
             </form>

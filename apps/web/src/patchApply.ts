@@ -11,7 +11,22 @@ export interface ParsedPatch {
   hunks: PatchHunk[];
 }
 
+export interface MultiFilePatchEntry {
+  path: string;
+  diff: string;
+  isNewFile?: boolean;
+}
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+const SHELL_LANGUAGES = new Set([
+  "sh", "shell", "bash", "zsh", "fish", "console", "shellsession", "powershell", "pwsh", "ps1", "cmd", "bat",
+]);
+
+export function isShellLanguage(language: string | undefined): boolean {
+  if (!language) return false;
+  const base = language.toLowerCase().split(":")[0]?.trim() ?? "";
+  return SHELL_LANGUAGES.has(base);
+}
 
 export function isUnifiedDiff(language: string | undefined, code: string): boolean {
   const lang = (language ?? "").toLowerCase();
@@ -40,6 +55,34 @@ function normalizeCandidatePath(raw: string): string | undefined {
   const cleaned = raw.trim().replace(/^["']|["']$/g, "").replace(/^\.\//, "");
   if (!cleaned || cleaned.startsWith("/") || cleaned.includes("..") || cleaned.includes("\\")) return undefined;
   return cleaned;
+}
+
+export function parseMultiFileUnifiedDiff(diffText: string): MultiFilePatchEntry[] {
+  const normalized = diffText.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const sections: string[][] = [];
+  let current: string[] = [];
+
+  for (const line of lines) {
+    const startsNewSection = line.startsWith("diff --git ")
+      || (line.startsWith("--- ") && current.some((entry) => entry.startsWith("@@ ")));
+    if (startsNewSection && current.length > 0) {
+      sections.push(current);
+      current = [];
+    }
+    current.push(line);
+  }
+  if (current.length > 0) sections.push(current);
+
+  const entries: MultiFilePatchEntry[] = [];
+  for (const section of sections) {
+    const text = section.join("\n");
+    const parsed = parseUnifiedDiff(text);
+    if (!parsed?.targetPath) continue;
+    const isNewFile = /^--- \/dev\/null$/m.test(text);
+    entries.push({ path: parsed.targetPath, diff: text, isNewFile });
+  }
+  return entries;
 }
 
 export function parseUnifiedDiff(diffText: string): ParsedPatch | null {

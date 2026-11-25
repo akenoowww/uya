@@ -29,6 +29,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: "recall-prompt", label: "Recall previous prompt (empty input)", category: "Splits & Chat", mac: ["↑"], other: ["↑"] },
   { id: "open-project", label: "Open project folder", category: "Workspace", mac: ["⌘", "O"], other: ["Ctrl", "O"] },
   { id: "toggle-explorer", label: "Toggle Explorer sidebar", category: "Workspace", mac: ["⌘", "B"], other: ["Ctrl", "B"] },
+  { id: "toggle-search", label: "Search across workspace", category: "Workspace", mac: ["⌘", "⇧", "F"], other: ["Ctrl", "Shift", "F"] },
   { id: "toggle-git", label: "Toggle Git sidebar", category: "Workspace", mac: ["⌘", "⇧", "G"], other: ["Ctrl", "Shift", "G"] },
   { id: "toggle-history", label: "Toggle Run History", category: "Workspace", mac: ["⌘", "⇧", "H"], other: ["Ctrl", "Shift", "H"] },
   { id: "open-prompts", label: "Open Prompt Library", category: "Workspace", mac: ["⌘", "⇧", "L"], other: ["Ctrl", "Shift", "L"] },
@@ -129,6 +130,11 @@ export function useWorkbenchShortcuts(
         workbench.toggleSidebar("git");
         return;
       }
+      if (key === "f" && event.shiftKey) {
+        event.preventDefault();
+        workbench.toggleSidebar("search");
+        return;
+      }
       if (key === "h" && event.shiftKey) {
         event.preventDefault();
         workbench.toggleSidebar("history");
@@ -159,7 +165,7 @@ export function useWorkbenchShortcuts(
         event.preventDefault();
         const pane = workbench.activeChatPane();
         if (pane) {
-          workbench.dock.newConversation(pane.id);
+          workbench.startNewConversation(pane.id);
           requestAnimationFrame(() => focusPaneInput(pane.id));
         }
         return;

@@ -112,6 +112,8 @@ Follow the [release process](CONTRIBUTING.md#publishing-a-release). The release 
 | --- | --- | --- |
 | **Codex** | `exec --json` in read-only sandbox | Yes |
 | **Claude Code** | `stream-json` with tools and project settings disabled | Yes |
+| **Antigravity (`agy`)** | OAuth ACP session (`agy acp --sandbox`) with live per-model effort discovery and read-only permission denial | Yes |
+| **Gemini CLI (`gemini`)** | OAuth / API key `stream-json` with isolated read-only policy and live ACP / `models list` discovery | Yes |
 | **Gemini API (`gemini-api`)** | Stateless Interactions API streaming (`generate --no-interactive -o json`) with live API model & thinking discovery | Yes (`gemini-api explore`) |
 | **Qwen Code** | `stream-json` in `--safe-mode` with `0` tool calls | Yes |
 | **OpenCode** | `run --format json --pure` with isolated config & CLI environment auth | Yes (including saved login & managed settings) |

@@ -1,4 +1,7 @@
 import type { EffortLevel } from "@ide/protocol";
+import { lstatSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { normalizeEffortLevel, type AdapterRequest } from "./provider-adapter";
 
 export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -11,6 +14,13 @@ export const GEMINI_THINKING_LEVELS: readonly GeminiThinkingLevel[] = [
   "xhigh",
 ];
 
+export const GEMINI_CLI_THINKING_LEVELS: readonly EffortLevel[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+];
+
 function isSafeModelId(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
@@ -19,6 +29,127 @@ function isSafeModelId(value: unknown): value is string {
     && !value.startsWith("-")
     && !/[\s\x00-\x1f\x7f]/.test(value);
 }
+
+// ---------------------------------------------------------------------------
+// Gemini CLI (`@google/gemini-cli`, OAuth / API key / Vertex AI)
+// ---------------------------------------------------------------------------
+
+const geminiCliThinkingLevels = {
+  minimal: { level: "MINIMAL", budget: 512 },
+  low: { level: "LOW", budget: 1024 },
+  medium: { level: "MEDIUM", budget: 4096 },
+  high: { level: "HIGH", budget: 8192 },
+  xhigh: { level: "HIGH", budget: 8192 },
+  max: { level: "HIGH", budget: 8192 },
+} as const satisfies Record<EffortLevel, { level: string; budget: number }>;
+
+function thinkingOverride(model: string, thinkingConfig: { thinkingLevel: string } | { thinkingBudget: number }) {
+  return { match: { model }, modelConfig: { generateContentConfig: { thinkingConfig } } };
+}
+
+function geminiCliModelConfigs(effort: EffortLevel | undefined) {
+  const selected = normalizeEffortLevel(effort);
+  if (!selected) return;
+  const { level: thinkingLevel, budget: thinkingBudget } = geminiCliThinkingLevels[selected];
+  // Match Gemini CLI's built-in base aliases so overrides apply to manual models and Auto routing.
+  const customOverrides = [
+    thinkingOverride("chat-base-3", { thinkingLevel }),
+    thinkingOverride("chat-base-2.5", { thinkingBudget }),
+  ];
+  if (thinkingLevel === "MINIMAL" || thinkingLevel === "MEDIUM") {
+    customOverrides.push(thinkingOverride("gemini-3-pro-preview", { thinkingLevel: "LOW" }));
+  }
+  if (thinkingLevel === "MINIMAL") {
+    for (const model of ["gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3.8-flash"]) {
+      customOverrides.push(thinkingOverride(model, { thinkingLevel: "LOW" }));
+    }
+  }
+  return { customOverrides };
+}
+
+export function geminiHasUnmanagedSettings(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.GEMINI_CLI_SYSTEM_SETTINGS_PATH) return false;
+  const path = process.platform === "darwin" ? "/Library/Application Support/GeminiCli/settings.json"
+    : process.platform === "win32" ? join(env.ProgramData || "C:\\ProgramData", "gemini-cli", "settings.json")
+    : process.platform === "linux" ? "/etc/gemini-cli/settings.json" : undefined;
+  if (!path) return false;
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+export async function geminiCliInvocation(
+  directory: string,
+  protocol: "stream-json" | "acp" = "stream-json",
+  effort?: EffortLevel,
+) {
+  const settingsPath = join(directory, "settings.json");
+  const policyPath = join(directory, "uya-read-only.toml");
+  const disabledName = `uya-disabled-${crypto.randomUUID()}`;
+  const settings = {
+    hooksConfig: { enabled: false },
+    mcp: { serverCommand: "" },
+    context: { fileName: `${disabledName}.md`, includeDirectoryTree: false, loadMemoryFromIncludeDirectories: false },
+    tools: { core: [disabledName], allowed: [], discoveryCommand: "", callCommand: "" },
+    skills: { enabled: false },
+    ide: { enabled: false },
+    experimental: { enableAgents: false, adk: { agentSessionNoninteractiveEnabled: false } },
+    telemetry: { enabled: false },
+    privacy: { usageStatisticsEnabled: false },
+    modelConfigs: geminiCliModelConfigs(effort),
+  };
+  const policy = '[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 999\n';
+  await Promise.all([
+    writeFile(settingsPath, JSON.stringify(settings), { mode: 0o600 }),
+    writeFile(policyPath, policy, { mode: 0o600 }),
+  ]);
+  return {
+    settingsPath,
+    args: [
+      "--extensions", "none", "--allowed-mcp-server-names", disabledName,
+      "--policy", policyPath, "--approval-mode", "default",
+      ...(protocol === "acp" ? ["--acp"] : ["--output-format", "stream-json"]),
+    ],
+  };
+}
+
+export function parseGeminiCliModelsListJson(raw: string): string[] {
+  const seen = new Set<string>();
+  const collect = (value: unknown) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+      return;
+    }
+    if (typeof value === "string") {
+      if (isSafeModelId(value) && value.toLowerCase() !== "default") seen.add(value);
+      return;
+    }
+    if (typeof value !== "object") return;
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.models)) {
+      for (const item of obj.models) collect(item);
+      return;
+    }
+    const candidate = obj.modelId ?? obj.id ?? obj.value;
+    if (isSafeModelId(candidate) && candidate.toLowerCase() !== "default") {
+      seen.add(candidate);
+    }
+  };
+  try {
+    collect(JSON.parse(raw));
+  } catch {
+    // Ignore non-JSON output from older Gemini CLI builds without `models list -o json`.
+  }
+  return [...seen];
+}
+
+// ---------------------------------------------------------------------------
+// Gemini API (`gemini-api` CLI, Interactions API)
+// ---------------------------------------------------------------------------
 
 export interface DiscoveredGeminiModel {
   id: string;

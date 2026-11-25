@@ -1,10 +1,11 @@
 const CAPTURE_CHARS = 8 * 1024;
 
 const cliFlags = [
-  "--agent", "--ask-for-approval", "--disable", "--disable-slash-commands", "--disallowedTools",
-  "--effort", "--ephemeral", "--format", "--ignore-rules", "--ignore-user-config", "--include-partial-messages",
-  "--input-format", "--json", "--max-tool-calls", "--mcp-config", "--model",
-  "--no-chrome", "--no-interactive", "--no-session-persistence", "--output-format", "--pure", "--safe-mode",
+  "--acp", "--agent", "--allowed-mcp-server-names", "--approval-mode", "--ask-for-approval", "--disable",
+  "--disable-slash-commands", "--disable-telemetry", "--disallowedTools",
+  "--effort", "--ephemeral", "--extensions", "--format", "--ignore-rules", "--ignore-user-config", "--include-partial-messages",
+  "--input-format", "--json", "--max-tool-calls", "--mcp-config", "--mode", "--model",
+  "--no-chrome", "--no-interactive", "--no-session-persistence", "--output-format", "--policy", "--print", "--pure", "--safe-mode",
   "--sandbox", "--setting-sources", "--settings", "--skip-git-repo-check",
   "--strict-mcp-config", "--thinking", "--tools", "--variant", "--verbose",
 ];
@@ -14,10 +15,10 @@ const diagnoses = [
     kind: "authentication",
     patterns: [
       /\b(?:401\s+(?:unauthorized|authentication)|(?:http|status(?:[_ ]code)?|api error)"?[:= ]+401)\b/i,
-      /\b(?:invalid[_ -](?:api[_ -]key|credentials)|authentication(?: is)?[_ -](?:failed|required|error)|unauthenticated)\b/i,
+      /\b(?:invalid[_ -](?:api[_ -]key|credentials)|authentication(?: is)?[_ -](?:failed|required|error)|auth[_ -]required|unauthenticated|not authenticated)\b/i,
       /\b(?:could not find|missing|no) (?:an? )?(?:api[_ -]key|authentication credentials)\b/i,
       /\bapi[_ -]key (?:is )?not valid\b/i,
-      /\b(?:not (?:logged|signed) in|(?:log|sign) in to (?:continue|use))\b/i,
+      /\b(?:not (?:logged|signed) in|(?:log|sign) in to (?:continue|use)|please (?:log|sign) in)\b/i,
       /\b(?:(?:expired|missing|invalid) (?:access |refresh )?token|(?:access |refresh )?token (?:has )?expired)\b/i,
     ],
     message: "The CLI could not authenticate. Check its sign-in in Terminal and retry.",
@@ -25,11 +26,15 @@ const diagnoses = [
   {
     kind: "quota",
     patterns: [
-      /\b(?:insufficient[_ -]quota|(?:usage|billing|credit) (?:limit|quota) (?:reached|exceeded))\b/i,
+      /\b(?:insufficient[_ -]quota|quota[_ -](?:exceeded|exhausted)|payment[_ -]required|(?:usage|billing|credit) (?:limit|quota) (?:reached|exceeded))\b/i,
+      /\b(?:(?:http|status(?:[_ ]code)?|api error)"?[:= ]+402|credit balance is depleted)\b/i,
       /\b(?:quota|credits?) (?:has been |have been )?(?:exceeded|exhausted)\b/i,
       /\b(?:exceeded|exhausted) (?:your |the )?(?:current )?(?:quota|credits?)\b/i,
+      /\blimit:\s*0\b/i,
+      /\b(?:not available|unavailable) on (?:the )?free tier\b/i,
+      /\bupgrade your tier\b/i,
     ],
-    message: "The provider reported an exhausted quota. Check its account limits or select another provider.",
+    message: "The provider reported an exhausted quota or unavailable tier limit. Check account limits/billing or select another model or provider.",
   },
   {
     kind: "rate-limit",

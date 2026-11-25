@@ -94,7 +94,11 @@ function terminalArgsFor(provider: Provider | undefined, model: string | undefin
       const mapped = effort === "minimal" ? "low" : effort === "xhigh" ? "high" : effort;
       args.push("--effort", mapped);
     }
-    if (model && ["codex", "claude", "qwen", "opencode", "kimi"].includes(provider.id)) {
+    if (provider.id === "antigravity" && effort) {
+      const mapped = effort === "minimal" ? "low" : effort;
+      args.push("--effort", mapped);
+    }
+    if (model && ["codex", "claude", "antigravity", "gemini", "qwen", "opencode", "kimi"].includes(provider.id)) {
       args.push("--model", model);
     }
     return args.length ? args : provider.terminalArgs;

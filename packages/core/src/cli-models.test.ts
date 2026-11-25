@@ -9,7 +9,8 @@ import { discoverCliModels, isSafeCliModelName, normalizeEffortLevel, type CliMo
 
 const codexFallback: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 const claudeEfforts: EffortLevel[] = ["low", "medium", "high", "max"];
-const geminiEfforts: EffortLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
+const geminiCliEfforts: EffortLevel[] = ["minimal", "low", "medium", "high"];
+const geminiApiEfforts: EffortLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 function fixtureEnv(): NodeJS.ProcessEnv {
   if (process.platform !== "win32") return {};
@@ -292,6 +293,209 @@ rl.on("line", (line) => {
   }
 });
 
+test("discovers Antigravity models and exact per-model efforts via ACP configOptions and availableModels", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-antigravity-acp-"));
+  try {
+    const command = await createFakeCli(fixture, "agy", `
+import readline from "node:readline";
+const args = process.argv.slice(2);
+if (args[0] !== "acp" || !args.includes("--sandbox") || !args.includes("--disable-telemetry")) process.exit(2);
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }));
+  } else if (msg.method === "session/new") {
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        sessionId: "agy-1",
+        models: {
+          currentModelId: "gemini-4-neon-high",
+          availableModels: [
+            { modelId: "gemini-4-neon-high" },
+            { modelId: "gemini-4-neon-xhigh" },
+            { modelId: "gemini-4-neon-low" },
+            { modelId: "gemini-4-carbon-medium" },
+            { modelId: "gemini-4-carbon-high" },
+            { modelId: "gemini-pro-orchestrator-neon" },
+            { modelId: "gpt-oss-120b-medium" },
+          ],
+        },
+        configOptions: [
+          {
+            id: "model",
+            category: "model",
+            currentValue: "gemini-4-neon",
+            options: [
+              { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+              { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+              { value: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+              { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
+              { value: "--injected", name: "Bad" },
+            ],
+          },
+          {
+            id: "thought_level",
+            category: "thought_level",
+            currentValue: "high",
+            options: [
+              { value: "low" },
+              { value: "medium" },
+              { value: "high" },
+              { value: "xhigh" },
+            ],
+          },
+        ],
+      },
+    }));
+  }
+});
+`);
+    const discovered = await discoverCliModels("antigravity", {
+      command,
+      home: fixture,
+      env: fixtureEnv(),
+      timeoutMs: 3_000,
+    });
+    expect(discovered).toEqual({
+      defaultModel: "gemini-4-neon",
+      defaultEffort: "high",
+      models: ["gemini-4-neon", "gemini-4-carbon", "gemini-pro-orchestrator-neon", "gpt-oss-120b-medium"],
+      supportedEfforts: ["low", "medium", "high", "xhigh"],
+      modelEfforts: {
+        "gemini-4-neon": ["low", "high", "xhigh"],
+        "gemini-4-carbon": ["medium", "high"],
+        "gemini-pro-orchestrator-neon": [],
+        "gpt-oss-120b-medium": [],
+      },
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("falls back to agy models output when Antigravity ACP is unavailable", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-antigravity-models-"));
+  try {
+    const command = await createFakeCli(fixture, "agy", `
+const args = process.argv.slice(2);
+if (args[0] === "acp") process.exit(2);
+if (args[0] === "models") {
+  console.log("\\r⠋ Fetching available models...\\rgemini-4-neon-high\\tGemini 4 Neon (High)");
+  console.log("gemini-4-neon-xhigh\\tGemini 4 Neon (XHigh)");
+  console.log("gemini-4-neon-low\\tGemini 4 Neon (Low)");
+  console.log("gpt-oss-120b-medium  GPT-OSS 120B (Medium)");
+  console.log("--flag-bad\\tIgnored");
+} else {
+  process.exit(3);
+}
+`);
+    const discovered = await discoverCliModels("antigravity", {
+      command,
+      home: fixture,
+      env: fixtureEnv(),
+      timeoutMs: 3_000,
+    });
+    expect(discovered).toEqual({
+      defaultModel: undefined,
+      models: ["gemini-4-neon", "gpt-oss-120b-medium"],
+      supportedEfforts: ["low", "high", "xhigh"],
+      modelEfforts: {
+        "gemini-4-neon": ["low", "high", "xhigh"],
+        "gpt-oss-120b-medium": [],
+      },
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("discovers Gemini CLI models via isolated ACP and falls back to models list JSON", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-cli-"));
+  try {
+    await mkdir(join(fixture, ".gemini"), { recursive: true });
+    await writeFile(join(fixture, ".gemini", "settings.json"), JSON.stringify({ model: { name: "gemini-3.8-flash" } }));
+    const acpCli = await createFakeCli(fixture, "gemini", `
+import readline from "node:readline";
+import { readFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (!args.includes("--acp") || !args.includes("--policy")) process.exit(2);
+if (!process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH) process.exit(3);
+const settings = JSON.parse(readFileSync(process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH, "utf8"));
+if (settings.hooksConfig?.enabled !== false) process.exit(4);
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }));
+  } else if (msg.method === "session/new") {
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        sessionId: "gemini-1",
+        models: {
+          currentModelId: "auto",
+          availableModels: [
+            { modelId: "auto", name: "Auto" },
+            { modelId: "gemini-3.1-pro-preview" },
+            { modelId: "gemini-3.8-flash" },
+          ],
+        },
+        ...(process.env.FIXTURE_EFFORT ? {
+          configOptions: [{
+            id: "thought_level",
+            category: "thought_level",
+            currentValue: "medium",
+            options: [{ value: "low" }, { value: "medium" }, { value: "high" }],
+          }],
+        } : {}),
+      },
+    }));
+  }
+});
+`);
+
+    const env = { ...fixtureEnv(), GEMINI_CLI_SYSTEM_SETTINGS_PATH: undefined };
+    expect(await discoverCliModels("gemini", { command: acpCli, home: fixture, env, timeoutMs: 3_000 })).toEqual({
+      defaultModel: "gemini-3.8-flash",
+      models: ["gemini-3.8-flash", "auto", "gemini-3.1-pro-preview"],
+      supportedEfforts: geminiCliEfforts,
+    });
+    expect(await discoverCliModels("gemini", {
+      command: acpCli, home: fixture, env: { ...env, FIXTURE_EFFORT: "1" }, timeoutMs: 3_000,
+    })).toEqual({
+      defaultModel: "gemini-3.8-flash",
+      defaultEffort: "medium",
+      models: ["gemini-3.8-flash", "auto", "gemini-3.1-pro-preview"],
+      supportedEfforts: ["low", "medium", "high"],
+    });
+
+    const listOnlyCli = await createFakeCli(fixture, "gemini-list", `
+const args = process.argv.slice(2);
+if (args.includes("--acp")) process.exit(2);
+if (args[0] === "models" && args[1] === "list" && args.includes("json")) {
+  console.log(JSON.stringify([
+    { modelId: "auto", name: "Auto" },
+    { modelId: "gemini-3.8-flash", name: "gemini-3.8-flash" },
+    { modelId: "--bad", name: "Bad" },
+  ]));
+} else {
+  process.exit(3);
+}
+`);
+    expect(await discoverCliModels("gemini", { command: listOnlyCli, home: fixture, env, timeoutMs: 3_000 })).toEqual({
+      defaultModel: "gemini-3.8-flash",
+      models: ["gemini-3.8-flash", "auto"],
+      supportedEfforts: geminiCliEfforts,
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("discovers live Gemini API models, thinking capabilities, and schema effort levels", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "uya-cli-gemini-api-"));
   try {
@@ -322,7 +526,7 @@ if (args[0] === "models" && args[1] === "list") {
   process.exit(2);
 }
 `);
-    const discovered = await discoverCliModels("gemini", {
+    const discovered = await discoverCliModels("gemini-api", {
       command,
       home: fixture,
       env: fixtureEnv(),
@@ -331,10 +535,10 @@ if (args[0] === "models" && args[1] === "list") {
     expect(discovered).toEqual({
       defaultModel: "gemini-4-hydrogen",
       models: ["gemini-4-hydrogen", "gemini-4-neon", "gemma-4-31b-it"],
-      supportedEfforts: geminiEfforts,
+      supportedEfforts: geminiApiEfforts,
       modelEfforts: {
-        "gemini-4-hydrogen": geminiEfforts,
-        "gemini-4-neon": geminiEfforts,
+        "gemini-4-hydrogen": geminiApiEfforts,
+        "gemini-4-neon": geminiApiEfforts,
         "gemma-4-31b-it": [],
       },
     });
@@ -366,7 +570,7 @@ if (args[0] === "models" && args[1] === "list") {
   process.exit(2);
 }
 `);
-    const discovered = await discoverCliModels("gemini", {
+    const discovered = await discoverCliModels("gemini-api", {
       command,
       home: fixture,
       env: fixtureEnv(),
@@ -495,10 +699,18 @@ test("returns no hardcoded fallback models when CLI fails, times out, or is miss
     const markerPath = join(fixture, "probe-survived.txt");
     const hanging = await createFakeCli(fixture, "hang-cli", `setTimeout(() => Bun.write(${JSON.stringify(markerPath)}, "survived"), 1_250);`);
 
+    expect(await discoverCliModels("antigravity", { home: fixture, env: {} })).toEqual({ models: [] });
+    expect(await discoverCliModels("antigravity", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
+      models: [],
+    });
     expect(await discoverCliModels("gemini", { home: fixture, env: {} })).toEqual({ models: [] });
     expect(await discoverCliModels("gemini", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
       models: [],
-      supportedEfforts: geminiEfforts,
+      supportedEfforts: geminiCliEfforts,
+    });
+    expect(await discoverCliModels("gemini-api", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
+      models: [],
+      supportedEfforts: geminiApiEfforts,
     });
     expect(await discoverCliModels("claude", { command: failing, home: fixture, env: fixtureEnv(), timeoutMs: 1_000 })).toEqual({
       models: [],

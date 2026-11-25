@@ -1,7 +1,8 @@
 import type { EffortLevel, Provider } from "@ide/protocol";
 import { runCli, type CliPrepare } from "./agents";
 import {
-  openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli, prepareGemini, prepareOpenCode, prepareQwen,
+  geminiBlocked, openCodeBlocked, prepareClaude, prepareCodex, prepareCustomCli,
+  prepareGeminiApi, prepareGeminiCli, prepareOpenCode, prepareQwen, runAntigravity,
 } from "./cli-adapters";
 import {
   discoverCliModels, fallbackCliEfforts, type CliModelDiscoverer, type CliModelDiscovery,
@@ -21,6 +22,7 @@ interface CliDefinition {
   command: string;
   terminalArgs?: string[];
   prepare?: CliPrepare;
+  run?: (request: AdapterRequest) => Promise<Usage>;
   blocked?: () => string | undefined;
   detail?: string;
 }
@@ -35,7 +37,7 @@ interface CachedCliModels {
 }
 
 function cliAdapter(
-  { id, name, command: configured, terminalArgs, prepare, blocked, detail }: CliDefinition,
+  { id, name, command: configured, terminalArgs, prepare, run: customRun, blocked, detail }: CliDefinition,
   discoverModels: CliModelDiscoverer,
 ): ProviderAdapter {
   let cached: CachedCliModels | undefined;
@@ -64,16 +66,18 @@ function cliAdapter(
     return promise;
   }
 
+  const executor = customRun ?? (prepare ? ((request: AdapterRequest) => runCli(request, prepare)) : undefined);
+
   return {
     id,
     async discover(refresh = false) {
       const command = executable(configured);
       const unavailable = command ? blocked?.() : "Executable missing from PATH";
-      const discovered = command && prepare && !unavailable ? await resolveModels(command, refresh) : undefined;
+      const discovered = command && executor && !unavailable ? await resolveModels(command, refresh) : undefined;
       return {
         id, name, kind: "cli", command,
         ...(terminalArgs ? { terminalArgs } : {}),
-        available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && prepare && !unavailable),
+        available: Boolean(command), terminal: Boolean(command), structured: Boolean(command && executor && !unavailable),
         models: discovered?.models.length ? discovered.models : undefined,
         defaultModel: discovered?.defaultModel,
         supportedEfforts: discovered && (discovered.supportedEfforts ?? fallbackCliEfforts(id)),
@@ -82,10 +86,10 @@ function cliAdapter(
         detail: unavailable ?? detail,
       };
     },
-    run: prepare && ((request) => {
+    run: executor && ((request) => {
       const reason = blocked?.();
       if (reason) throw new AdapterError(reason);
-      return runCli(request, prepare);
+      return executor(request);
     }),
   };
 }
@@ -181,7 +185,9 @@ export class ProviderRegistry {
     const adapters = [
       cli({ id: "codex", name: "Codex", command: "codex", prepare: prepareCodex }),
       cli({ id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude }),
-      cli({ id: "gemini", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGemini }),
+      cli({ id: "antigravity", name: "Antigravity", command: "agy", run: runAntigravity }),
+      cli({ id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGeminiCli, blocked: geminiBlocked }),
+      cli({ id: "gemini-api", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGeminiApi }),
       cli({ id: "qwen", name: "Qwen Code", command: "qwen", prepare: prepareQwen }),
       cli({
         id: "opencode", name: "OpenCode", command: "opencode", prepare: prepareOpenCode, blocked: openCodeBlocked,

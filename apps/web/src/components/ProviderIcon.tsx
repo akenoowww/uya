@@ -1,3 +1,4 @@
+import antigravityIconUrl from "../assets/icons/provider-antigravity.svg";
 import claudeIconUrl from "../assets/icons/provider-claude.png";
 import codexIconUrl from "../assets/icons/provider-codex.png";
 import customIconUrl from "../assets/icons/provider-custom.png";
@@ -12,10 +13,12 @@ import qwenIconUrl from "../assets/icons/provider-qwen.png";
 import uyaMarkUrl from "../assets/uya-mark.png";
 
 const PROVIDER_ICONS: ReadonlyMap<string, string> = new Map([
+  ["antigravity", antigravityIconUrl],
   ["claude", claudeIconUrl],
   ["codex", codexIconUrl],
   ["custom", customIconUrl],
   ["gemini", geminiIconUrl],
+  ["gemini-api", geminiIconUrl],
   ["kimi", kimiIconUrl],
   ["llamacpp", llamaCppIconUrl],
   ["lmstudio", lmStudioIconUrl],

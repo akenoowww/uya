@@ -104,8 +104,151 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"Qwen effort fixtu
   expect(result.events).toEqual([["text", "Qwen effort fixture"]]);
 });
 
-test("Gemini API adapter streams Interactions API thought and text deltas with native multi-turn JSON stdin", async () => {
+test("Antigravity ACP adapter sets model and effort, rejects tool permissions, and streams thought and text chunks", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "uya-agy-acp-fixture-"));
+  try {
+    const scriptPath = join(fixture, "agy.mjs");
+    await writeFile(scriptPath, `
+import readline from "node:readline";
+const args = process.argv.slice(2);
+if (args[0] !== "acp" || !args.includes("--sandbox") || !args.includes("--disable-telemetry")) process.exit(2);
+const rl = readline.createInterface({ input: process.stdin });
+let selectedModel = "gemini-4-neon";
+let selectedEffort = "high";
+let rejectedPermission = false;
+let pendingPromptId = null;
+
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } }));
+  } else if (msg.method === "session/new") {
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        sessionId: "sess-1",
+        models: { currentModelId: "gemini-4-neon-high", availableModels: [{ modelId: "gemini-4-neon-xhigh" }] },
+        configOptions: [
+          { id: "model", category: "model", currentValue: "gemini-4-neon", options: [{ value: "gemini-4-neon" }, { value: "gemini-4-carbon" }] },
+          { id: "thought_level", category: "thought_level", currentValue: "high", options: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }] },
+        ],
+      },
+    }));
+  } else if (msg.method === "session/set_config_option") {
+    if (msg.params.configId === "model") selectedModel = msg.params.value;
+    if (msg.params.configId === "thought_level") selectedEffort = msg.params.value;
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        configOptions: [
+          { id: "model", category: "model", currentValue: selectedModel, options: [{ value: "gemini-4-neon" }, { value: "gemini-4-carbon" }] },
+          { id: "thought_level", category: "thought_level", currentValue: selectedEffort, options: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }] },
+        ],
+      },
+    }));
+  } else if (msg.method === "session/prompt") {
+    if (selectedModel !== "gemini-4-neon" || selectedEffort !== "xhigh") process.exit(3);
+    const text = msg.params?.prompt?.[0]?.text ?? "";
+    if (!text.includes("Keep this answer") || text.includes("@reference")) process.exit(4);
+    pendingPromptId = msg.id;
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "sess-1", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reasoning..." } } },
+    }));
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "sess-1", update: { sessionUpdate: "tool_call", title: "run_command" } },
+    }));
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "session/request_permission",
+      params: {
+        sessionId: "sess-1",
+        options: [
+          { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+          { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+        ],
+      },
+    }));
+  } else if (msg.id === 99) {
+    if (msg.result?.outcome?.optionId !== "reject_once") process.exit(5);
+    rejectedPermission = true;
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "sess-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Antigravity " } } },
+    }));
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "sess-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "OAuth reply" } } },
+    }));
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: pendingPromptId,
+      result: { stopReason: "end_turn", usage: { inputTokens: 21, outputTokens: 9 } },
+    }));
+  }
+});
+rl.on("close", () => { if (!rejectedPermission) process.exit(6); process.exit(0); });
+`, "utf8");
+    const command = join(fixture, "agy");
+    await writeFile(command, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`, { mode: 0o700 });
+
+    const events: [string, string][] = [];
+    const usage = await registry.run({
+      provider: { id: "antigravity", name: "Antigravity", kind: "cli", command, structured: true, terminal: true, available: true },
+      model: "gemini-4-neon",
+      effort: "max",
+      prompt: "/goal test @reference",
+      messages: [
+        { role: "user", content: "First turn" },
+        { role: "assistant", content: "Keep this answer" },
+        { role: "user", content: "/goal test @reference" },
+      ],
+      signal: AbortSignal.timeout(4_000),
+      output: { emit: (kind, text) => { events.push([kind, text]); }, raw: () => {} },
+    });
+    expect(events).toEqual([
+      ["thinking", "Reasoning..."],
+      ["tool", "run_command"],
+      ["text", "Antigravity "],
+      ["text", "OAuth reply"],
+    ]);
+    expect(usage).toEqual({ model: "gemini-4-neon", inputTokens: 21, outputTokens: 9 });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Gemini CLI adapter isolates read-only settings and applies thinkingLevel overrides", async () => {
   const result = await runFixture("gemini", `
+case " $* " in *" --extensions none "*" --policy "*" --approval-mode default --output-format stream-json "*) ;; *) exit 2;; esac
+[ -n "$GEMINI_CLI_SYSTEM_SETTINGS_PATH" ]
+/usr/bin/grep -q '"thinkingLevel":"LOW"' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+/usr/bin/grep -q '"thinkingBudget":1024' "$GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+payload=$(/bin/cat)
+case "$payload" in *"Keep this answer"*"/goal test"*) ;; *) exit 3;; esac
+case "$payload" in "@*"|"/"*|*"@"*) exit 4;; esac
+printf '%s\\n' '{"type":"init","model":"gemini-3.8-flash"}'
+printf '%s\\n' '{"type":"thought","content":"CLI thought"}'
+printf '%s\\n' '{"type":"message","role":"assistant","content":"Gemini ","delta":true}'
+printf '%s\\n' '{"type":"message","role":"assistant","content":"CLI fixture","delta":true}'
+printf '%s\\n' '{"type":"result","status":"success","stats":{"input_tokens":11,"output_tokens":4}}'
+`, { effort: "low" });
+  expect(result).toEqual({
+    events: [["thinking", "CLI thought"], ["text", "Gemini "], ["text", "CLI fixture"]],
+    usage: { model: "gemini-3.8-flash", inputTokens: 11, outputTokens: 4 },
+  });
+});
+
+test("Gemini API adapter streams Interactions API thought and text deltas with native multi-turn JSON stdin", async () => {
+  const result = await runFixture("gemini-api", `
 case " $* " in *" generate --no-interactive -o json "*) ;; *) exit 2;; esac
 payload=$(/bin/cat)
 case "$payload" in *'"store":false'*'"stream":true'*'"thinking_level":"xhigh"'*'"thinking_summaries":"auto"'*) ;; *) exit 3;; esac
@@ -122,6 +265,14 @@ printf '%s\\n' '{"data":{"event_type":"interaction.completed","interaction":{"id
   });
 });
 
+test("Gemini API adapter classifies quota_exceeded SSE error codes as quota diagnostics", async () => {
+  await expect(runFixture("gemini-api", `
+/bin/cat >/dev/null
+printf '%s\\n' '{"data":{"event_type":"error","error":{"code":"quota_exceeded","message":"Daily limit reached"}}}'
+exit 1
+`)).rejects.toThrow(/quota|tier/i);
+});
+
 test("Gemini API request body maps effort dynamically and omits thinking config for non-thinking models", () => {
   expect(resolveGeminiThinkingLevel("minimal")).toBe("minimal");
   expect(resolveGeminiThinkingLevel("low")).toBe("low");
@@ -132,7 +283,7 @@ test("Gemini API request body maps effort dynamically and omits thinking config 
   expect(resolveGeminiThinkingLevel(undefined)).toBeUndefined();
 
   const provider = {
-    id: "gemini",
+    id: "gemini-api",
     name: "Gemini API",
     kind: "cli" as const,
     available: true,
@@ -287,7 +438,9 @@ test("registry reports discovered CLI effort metadata and built-in fallbacks", a
     });
     expect(sources.find((source) => source.id === "claude")?.supportedEfforts).toEqual(["low", "medium", "high", "max"]);
     expect(sources.find((source) => source.id === "qwen")?.supportedEfforts).toBeUndefined();
+    expect(sources.find((source) => source.id === "antigravity")?.supportedEfforts).toBeUndefined();
     expect(sources.find((source) => source.id === "gemini")?.supportedEfforts).toBeUndefined();
+    expect(sources.find((source) => source.id === "gemini-api")?.supportedEfforts).toBeUndefined();
     for (const source of sources.filter((source) => source.kind === "runtime")) {
       expect(source.structured).toBe(false);
       expect(source.supportedEfforts).toBeUndefined();

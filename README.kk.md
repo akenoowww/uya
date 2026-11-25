@@ -105,6 +105,8 @@ bun run desktop:build
 | --- | --- | --- |
 | **Codex** | Read-only sandbox ішінде `exec --json` | Иә |
 | **Claude Code** | Құралдар мен жоба баптаулары өшірілген `stream-json` | Иә |
+| **Antigravity (`agy`)** | OAuth ACP сессиясы (`agy acp --sandbox`), әр модельдің effort деңгейін тікелей алу және тек оқу режимі | Иә |
+| **Gemini CLI (`gemini`)** | Оқшауланған read-only саясат және ACP / `models list` арқылы OAuth / API-кілт `stream-json` | Иә |
 | **Gemini API (`gemini-api`)** | Нақты уақыттағы API модельдері мен ойлану деңгейлері бар Interactions API стримі (`generate --no-interactive -o json`) | Иә (`gemini-api explore`) |
 | **Qwen Code** | Құрал шақыру шегі `0` болатын `--safe-mode` ішінде `stream-json` | Иә |
 | **OpenCode** | Оқшауланған баптаулар және CLI ортасының авторизациясымен `run --format json --pure` | Иә (сақталған кіру мен басқарылатын баптаулармен бірге) |

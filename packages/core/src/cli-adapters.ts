@@ -2,12 +2,13 @@ import { lstatSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
+import { runAcpCli } from "./acp-runner";
 import { CliResponseError, type CliPrepare } from "./agents";
 import { claudeIsolationArgs } from "./claude";
 import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { customCliCommand, customStructuredBlockReason } from "./custom-cli";
-import { buildGeminiInteractionBody } from "./gemini";
+import { buildGeminiInteractionBody, geminiCliInvocation, geminiHasUnmanagedSettings } from "./gemini";
 import { AdapterError, normalizeEffortLevel, type AdapterOutput, type AdapterRequest, type Usage } from "./provider-adapter";
 
 const codexGlobalArgs = [
@@ -172,7 +173,54 @@ function messageStreamParser(name: string, output: AdapterOutput, usage: Usage, 
   };
 }
 
+function geminiCliParser(output: AdapterOutput, usage: Usage, args: readonly string[]) {
+  let streamed = false;
+  return (line: string) => {
+    const event = parseLine(line);
+    if (event.type === "init" && typeof event.model === "string" && isSafeCliModelName(event.model)) {
+      usage.model ??= event.model;
+    } else if (event.type === "message" && event.role === "assistant" && typeof event.content === "string") {
+      if (event.delta !== true && streamed) return false;
+      streamed ||= event.delta === true;
+      output.raw(JSON.stringify({ type: "text", text: event.content }));
+      output.emit("text", event.content);
+    } else if (event.type === "thought" && typeof event.content === "string") {
+      output.raw(JSON.stringify({ type: "thinking", text: event.content }));
+      output.emit("thinking", event.content);
+    } else if (event.type === "error") {
+      const error = record(event.error);
+      const message = typeof error.message === "string"
+        ? error.message
+        : typeof event.message === "string" ? event.message : undefined;
+      throw new CliResponseError(
+        "Gemini CLI could not complete this run. Check the CLI in Terminal.",
+        message ? classifyCliDiagnostic(message, args)?.message : undefined,
+      );
+    } else if (event.type === "result") {
+      if (event.status !== "success") {
+        const error = record(event.error);
+        throw new CliResponseError(
+          "Gemini CLI could not complete this run. Check the CLI in Terminal.",
+          typeof error.message === "string" ? classifyCliDiagnostic(error.message, args)?.message : undefined,
+        );
+      }
+      const stats = record(event.stats);
+      usage.inputTokens = tokenCount(stats.input_tokens);
+      usage.outputTokens = tokenCount(stats.output_tokens);
+      return true;
+    }
+    return false;
+  };
+}
+
 function geminiApiParser(output: AdapterOutput, usage: Usage, args: readonly string[]) {
+  const errorText = (error: JsonObject, fallback?: string) => {
+    const parts: string[] = [];
+    if (typeof error.code === "string" && error.code.trim()) parts.push(error.code.trim());
+    if (typeof error.message === "string" && error.message.trim()) parts.push(error.message.trim());
+    else if (fallback) parts.push(fallback);
+    return parts.length ? parts.join(": ") : undefined;
+  };
   return (line: string) => {
     const outer = parseLine(line);
     const event = outer.data && typeof outer.data === "object" && !Array.isArray(outer.data)
@@ -204,9 +252,7 @@ function geminiApiParser(output: AdapterOutput, usage: Usage, args: readonly str
       }
     } else if (eventType === "error") {
       const error = record(event.error);
-      const message = typeof error.message === "string"
-        ? error.message
-        : typeof event.message === "string" ? event.message : undefined;
+      const message = errorText(error, typeof event.message === "string" ? event.message : undefined);
       throw new CliResponseError(
         "Gemini API could not complete this run. Check authentication (gemini-api whoami / configure).",
         message ? classifyCliDiagnostic(message, args)?.message : undefined,
@@ -219,10 +265,10 @@ function geminiApiParser(output: AdapterOutput, usage: Usage, args: readonly str
       const status = typeof interaction.status === "string" ? interaction.status : "completed";
       if (status === "failed" || status === "cancelled" || status === "budget_exceeded") {
         const error = record(interaction.error);
-        const message = typeof error.message === "string" ? error.message : status;
+        const message = errorText(error, status);
         throw new CliResponseError(
           "Gemini API could not complete this run. Check authentication and limits in Terminal.",
-          classifyCliDiagnostic(message, args)?.message,
+          message ? classifyCliDiagnostic(message, args)?.message : undefined,
         );
       }
       output.raw(line);
@@ -330,7 +376,25 @@ export const prepareQwen: CliPrepare = async (request, cwd, usage) => {
   return { ...invocation, env: { QWEN_CODE_TRUSTED_FOLDERS_PATH: trustPath } };
 };
 
-export const prepareGemini: CliPrepare = (request, _cwd, usage) => {
+export function geminiBlocked() {
+  return geminiHasUnmanagedSettings() ? undefined : "System-managed Gemini settings use the interactive terminal.";
+}
+
+export const prepareGeminiCli: CliPrepare = async (request, cwd, usage) => {
+  const isolated = await geminiCliInvocation(cwd, "stream-json", request.effort);
+  const args = [...modelArgs(request), ...isolated.args];
+  return {
+    args,
+    encode: literalPrompt,
+    env: {
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH: isolated.settingsPath,
+      GEMINI_CLI_TRUST_WORKSPACE: "true",
+    },
+    parse: geminiCliParser(request.output, usage, args),
+  };
+};
+
+export const prepareGeminiApi: CliPrepare = (request, _cwd, usage) => {
   const args = ["generate", "--no-interactive", "-o", "json", ...modelArgs(request)];
   return {
     args,
@@ -338,6 +402,14 @@ export const prepareGemini: CliPrepare = (request, _cwd, usage) => {
     parse: geminiApiParser(request.output, usage, args),
   };
 };
+
+export function runAntigravity(request: AdapterRequest): Promise<Usage> {
+  return runAcpCli(request, {
+    args: ["acp", "--sandbox", "--disable-telemetry"],
+    encode: literalPrompt,
+    fallbackError: "Antigravity could not complete this run. Check your Google sign-in in Terminal (`agy`).",
+  });
+}
 
 function mayExist(path: string): boolean {
   try {

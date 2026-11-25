@@ -32,7 +32,11 @@ test("recognizes useful failure classes from CLI error syntax", () => {
   const examples = [
     ["Access token expired. Use the CLI login.", "authentication"],
     ['{"error_type":"authentication_error","status_code":403,"message":"Permission denied"}', "authentication"],
+    ["auth_required: Not authenticated. Please log in.", "authentication"],
     ['{"error_type":"rate_limit_error","status":"RESOURCE_EXHAUSTED","status_code":429}', "rate-limit"],
+    ['{"error":{"code":"too_many_requests","message":"Rate limit exceeded for model gemini-4-neon (limit: 0 input tokens per minute on Free Tier). Please upgrade your tier at https://ai.dev/rate-limit."},"error_type":"rate_limit_error","status_code":429}', "quota"],
+    ['{"error":{"code":"quota_exceeded","message":"Daily limit reached"}}', "quota"],
+    ['{"error":{"code":"payment_required","message":"Your Prepay credit balance is depleted."},"status_code":402}', "quota"],
     ["API Error: 429 insufficient_quota", "quota"],
     ["Request failed with status code 429", "rate-limit"],
     ["403 Forbidden", "permission"],

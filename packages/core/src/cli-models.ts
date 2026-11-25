@@ -6,10 +6,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { version as clientVersion } from "../package.json";
 import { cliEnv, spawnTarget } from "./agents";
+import { extractAntigravityAcpModels, parseAntigravityModelsOutput } from "./antigravity";
 import { claudeIsolationArgs } from "./claude";
 import {
+  GEMINI_CLI_THINKING_LEVELS,
   GEMINI_THINKING_LEVELS,
+  geminiCliInvocation,
+  geminiHasUnmanagedSettings,
   parseGeminiCatalogJson,
+  parseGeminiCliModelsListJson,
   parseGeminiModelsListJson,
   parseGeminiSchemaThinkingLevels,
 } from "./gemini";
@@ -48,7 +53,8 @@ export function fallbackCliEfforts(id: string): EffortLevel[] | undefined {
     case "codex": return ["low", "medium", "high", "xhigh", "max"];
     case "claude":
     case "opencode": return ["low", "medium", "high", "max"];
-    case "gemini": return [...GEMINI_THINKING_LEVELS];
+    case "gemini": return [...GEMINI_CLI_THINKING_LEVELS];
+    case "gemini-api": return [...GEMINI_THINKING_LEVELS];
   }
 }
 
@@ -588,6 +594,7 @@ async function discoverAcpModels(
   extraEnv: NodeJS.ProcessEnv | undefined,
   cwd: string,
   timeoutMs: number,
+  extract: (result: JsonObject | undefined) => CliModelDiscovery = extractAcpModels,
 ): Promise<CliModelDiscovery> {
   let result: CliModelDiscovery = { models: [] };
 
@@ -626,7 +633,7 @@ async function discoverAcpModels(
       }
       if (msg.id !== 2) return;
       if (!msg.error) {
-        result = extractAcpModels(asObject(msg.result));
+        result = extract(asObject(msg.result));
       }
       finish();
     },
@@ -641,6 +648,7 @@ async function captureProbeStdout(
   cwd: string,
   baseEnv: NodeJS.ProcessEnv | undefined,
   timeoutMs: number,
+  extraEnv?: NodeJS.ProcessEnv,
 ): Promise<string> {
   const chunks: string[] = [];
   await runCliProbe({
@@ -648,6 +656,7 @@ async function captureProbeStdout(
     args,
     cwd,
     baseEnv,
+    extraEnv,
     timeoutMs,
     closeStdin: true,
     onLine(line) {
@@ -657,7 +666,92 @@ async function captureProbeStdout(
   return chunks.join("\n").trim();
 }
 
-async function discoverGeminiModels(
+async function discoverAntigravityModels(
+  command: string,
+  baseEnv: NodeJS.ProcessEnv | undefined,
+  timeoutMs: number,
+): Promise<CliModelDiscovery> {
+  return withTempDir(async (cwd) => {
+    const startedAt = Date.now();
+    const acp = await discoverAcpModels(
+      command,
+      ["acp", "--sandbox", "--disable-telemetry"],
+      baseEnv,
+      undefined,
+      cwd,
+      timeoutMs,
+      extractAntigravityAcpModels,
+    );
+    if (acp.models.length > 0) return acp;
+
+    const remaining = timeoutMs - (Date.now() - startedAt);
+    if (remaining <= 100) return { models: [] };
+    const raw = await captureProbeStdout(command, ["models"], cwd, baseEnv, remaining);
+    return parseAntigravityModelsOutput(raw);
+  });
+}
+
+function readGeminiConfigDefault(home: string): string | undefined {
+  const settings = parseJsonObject(join(home, ".gemini", "settings.json"));
+  const modelSetting = settings?.model;
+  const configured = typeof modelSetting === "string"
+    ? modelSetting
+    : asObject(modelSetting)?.name;
+  return normalizeDefaultModel(configured);
+}
+
+async function discoverGeminiCliModels(
+  command: string,
+  home: string,
+  baseEnv: NodeJS.ProcessEnv | undefined,
+  timeoutMs: number,
+): Promise<CliModelDiscovery> {
+  if (!geminiHasUnmanagedSettings(baseEnv)) return { models: [] };
+  const configuredDefault = readGeminiConfigDefault(home);
+
+  return withTempDir(async (cwd) => {
+    const startedAt = Date.now();
+    const isolated = await geminiCliInvocation(cwd, "acp");
+    const extraEnv = {
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH: isolated.settingsPath,
+      GEMINI_CLI_TRUST_WORKSPACE: "true",
+    };
+    const discovered = await discoverAcpModels(
+      command,
+      isolated.args,
+      baseEnv,
+      extraEnv,
+      cwd,
+      timeoutMs,
+    );
+
+    let models = discovered.models;
+    const remaining = timeoutMs - (Date.now() - startedAt);
+    if (!models.length && remaining > 100) {
+      const listRaw = await captureProbeStdout(
+        command,
+        ["models", "list", "--output-format", "json"],
+        cwd,
+        baseEnv,
+        remaining,
+        extraEnv,
+      );
+      models = parseGeminiCliModelsListJson(listRaw);
+    }
+
+    const defaultModel = discovered.defaultModel ?? configuredDefault;
+    return {
+      models: uniqueModels([defaultModel, ...models]),
+      defaultModel,
+      supportedEfforts: discovered.supportedEfforts?.length
+        ? discovered.supportedEfforts
+        : fallbackCliEfforts("gemini"),
+      ...(discovered.defaultEffort ? { defaultEffort: discovered.defaultEffort } : {}),
+    };
+  });
+}
+
+async function discoverGeminiApiModels(
   command: string,
   baseEnv: NodeJS.ProcessEnv | undefined,
   timeoutMs: number,
@@ -676,7 +770,7 @@ async function discoverGeminiModels(
     ]);
 
     const schemaEfforts = parseGeminiSchemaThinkingLevels(schemaRaw);
-    const availableEfforts = schemaEfforts.length ? schemaEfforts : fallbackCliEfforts("gemini");
+    const availableEfforts = schemaEfforts.length ? schemaEfforts : fallbackCliEfforts("gemini-api");
     const live = parseGeminiModelsListJson(liveRaw);
     const catalog = parseGeminiCatalogJson(catalogRaw);
 
@@ -813,8 +907,12 @@ export async function discoverCliModels(
       return discoverCodexModels(command, home, options.env, timeoutMs);
     case "claude":
       return discoverClaudeModels(command, home, options.env, timeoutMs);
+    case "antigravity":
+      return discoverAntigravityModels(command, options.env, timeoutMs);
     case "gemini":
-      return discoverGeminiModels(command, options.env, timeoutMs);
+      return discoverGeminiCliModels(command, home, options.env, timeoutMs);
+    case "gemini-api":
+      return discoverGeminiApiModels(command, options.env, timeoutMs);
     case "qwen":
       return discoverQwenModels(command, options.env, timeoutMs);
     case "opencode":

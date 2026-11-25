@@ -1,16 +1,22 @@
 import { timingSafeEqual } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { RpcMethod, RpcParams, RpcResult, RunEvent } from "@ide/protocol";
+import { CheckpointManager } from "./checkpoints";
 import { CONVERSATION_HISTORY_LIMIT } from "./conversation";
 import type { CliModelDiscoverer } from "./cli-models";
-import { gitDiff, gitStatus } from "./git";
+import {
+  gitBranches, gitCheckout, gitCommit, gitCreateBranch, gitDiff, gitDiscard,
+  gitLog, gitStage, gitStatus, gitUnstage,
+} from "./git";
 import { History } from "./history";
 import type { LocalRuntimeId } from "./local-runtimes";
 import { Providers } from "./providers";
 import { Runs } from "./runs";
 import { isRpcMethod, parseRpcParams, rpcEnvelope, rpcResponseId, RpcError, subscription } from "./validation";
+import { discoverVerifyPresets, VerifyManager } from "./verify";
 import { Workspace } from "./workspace";
 import { WorkspaceError } from "./workspace-files";
+import { WorktreeArenaManager } from "./worktrees";
 
 const allowedOrigins = new Set([
   "tauri://localhost",
@@ -25,13 +31,21 @@ type SocketData = { runId?: string; authTimeout?: ReturnType<typeof setTimeout> 
 type Socket = ServerWebSocket<SocketData>;
 type Handlers = { [Method in RpcMethod]: (params: RpcParams<Method>) => RpcResult<Method> | Promise<RpcResult<Method>> };
 
-function rpcHandlers(history: History, providers: Providers, runs: Runs, workspace: Workspace): Handlers {
+function rpcHandlers(
+  history: History,
+  providers: Providers,
+  runs: Runs,
+  workspace: Workspace,
+  checkpoints: CheckpointManager,
+  arenas: WorktreeArenaManager,
+  verify: VerifyManager,
+): Handlers {
   function checkWorkspace(requested: string | null) {
     if (requested !== (workspace.path ?? null)) {
       throw new RpcError(-32009, "The workspace changed. Reopen the project and try again.");
     }
   }
-  function gitRoot(requested: string | undefined) {
+  function requireRoot(requested: string | undefined) {
     const root = workspace.path;
     if (root === undefined) throw new RpcError(-32004, "Open a project folder first.");
     if (requested !== undefined) checkWorkspace(requested);
@@ -81,10 +95,15 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       runs.cancel(id);
       return null;
     },
-    "runs.respondApproval": () => {
-      throw new RpcError(-32601, "Method not yet wired.");
+    "runs.respondApproval": ({ runId, requestId, decision }) => {
+      runs.respondApproval(runId, requestId, decision);
+      return null;
     },
-    "runs.closeSession": () => null,
+    "runs.closeSession": async ({ conversationId, workspacePath: requestedPath }) => {
+      checkWorkspace(requestedPath);
+      await runs.closeSession(conversationId, workspace.path);
+      return null;
+    },
     "runs.getRules": () => history.rules(),
     "runs.setRules": ({ rules }) => history.setRules(rules),
     "workspace.open": (params) => workspace.open(params),
@@ -101,8 +120,9 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.files(params);
     },
-    "workspace.search": () => {
-      throw new RpcError(-32601, "Method not yet wired.");
+    "workspace.search": ({ workspacePath: requestedPath, ...params }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.search(params);
     },
     "workspace.read": ({ workspacePath: requestedPath, ...params }) => {
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
@@ -129,29 +149,90 @@ function rpcHandlers(history: History, providers: Providers, runs: Runs, workspa
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.projectRules();
     },
-    "git.status": ({ workspacePath }) => gitStatus(gitRoot(workspacePath)),
-    "git.diff": ({ workspacePath, ...params }) => gitDiff(gitRoot(workspacePath), params),
-    "git.stage": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.unstage": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.discard": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.commit": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.branches": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.checkout": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.createBranch": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "git.log": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "checkpoints.list": () => [],
-    "checkpoints.restore": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.create": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.get": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.list": () => [],
-    "arena.slotDiff": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.verify": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.apply": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "arena.discard": () => null,
-    "verify.presets": () => [],
-    "verify.start": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "verify.get": () => { throw new RpcError(-32601, "Method not yet wired."); },
-    "verify.cancel": () => null,
+    "git.status": ({ workspacePath }) => gitStatus(requireRoot(workspacePath)),
+    "git.diff": ({ workspacePath, ...params }) => gitDiff(requireRoot(workspacePath), params),
+    "git.stage": ({ workspacePath, ...params }) => gitStage(requireRoot(workspacePath), params),
+    "git.unstage": ({ workspacePath, ...params }) => gitUnstage(requireRoot(workspacePath), params),
+    "git.discard": ({ workspacePath, paths }) => gitDiscard(requireRoot(workspacePath), paths),
+    "git.commit": ({ workspacePath, message }) => gitCommit(requireRoot(workspacePath), message),
+    "git.branches": ({ workspacePath }) => gitBranches(requireRoot(workspacePath)),
+    "git.checkout": ({ workspacePath, branch }) => gitCheckout(requireRoot(workspacePath), branch),
+    "git.createBranch": ({ workspacePath, name, checkout }) => gitCreateBranch(requireRoot(workspacePath), name, checkout),
+    "git.log": ({ workspacePath, limit }) => gitLog(requireRoot(workspacePath), limit),
+    "checkpoints.list": ({ workspacePath, limit }) => checkpoints.list(requireRoot(workspacePath), limit),
+    "checkpoints.restore": ({ id, workspacePath }) => checkpoints.restore(id, requireRoot(workspacePath)),
+    "arena.create": ({ workspacePath, prompt, slots, includeDirty }) =>
+      arenas.create(requireRoot(workspacePath), { prompt, slots, includeDirty }),
+    "arena.get": ({ id }) => arenas.get(id, true),
+    "arena.list": ({ workspacePath, limit }) => {
+      if (workspacePath !== undefined) checkWorkspace(workspacePath);
+      return arenas.list(workspacePath ?? workspace.path, limit);
+    },
+    "arena.slotDiff": ({ arenaId, slotId, path }) => arenas.slotDiff(arenaId, slotId, path),
+    "arena.verify": async ({ arenaId, slotId, command }) => {
+      const arena = await arenas.get(arenaId, false);
+      const slot = arena.slots.find((item) => item.id === slotId);
+      if (!slot) throw new RpcError(-32004, "Arena slot not found.");
+      arenas.recordVerify(arenaId, slotId, { command, status: "running" });
+      const started = await verify.start({
+        workspacePath: arena.workspacePath,
+        cwd: slot.worktreePath,
+        command,
+        onFinish: (finished) => {
+          arenas.recordVerify(arenaId, slotId, {
+            command,
+            status: finished.status,
+            exitCode: finished.exitCode,
+            durationMs: finished.finishedAt ? finished.finishedAt - finished.startedAt : undefined,
+            output: finished.output,
+          });
+        },
+      });
+      const completed = await verify.wait(started.id);
+      return arenas.recordVerify(arenaId, slotId, {
+        command,
+        status: completed.status,
+        exitCode: completed.exitCode,
+        durationMs: completed.finishedAt ? completed.finishedAt - completed.startedAt : undefined,
+        output: completed.output,
+      });
+    },
+    "arena.apply": ({ arenaId, slotId, mode, branchName, cleanup }) =>
+      arenas.apply(arenaId, slotId, { mode, branchName, cleanup }),
+    "arena.discard": async ({ arenaId }) => {
+      await arenas.discard(arenaId);
+      return null;
+    },
+    "verify.presets": ({ workspacePath }) => discoverVerifyPresets(requireRoot(workspacePath)),
+    "verify.start": async ({ command, workspacePath, arenaId, arenaSlotId }) => {
+      const root = requireRoot(workspacePath);
+      let cwd = root;
+      let onFinish: ((run: RpcResult<"verify.get">) => void) | undefined;
+      if (arenaId || arenaSlotId) {
+        if (!arenaId || !arenaSlotId) throw new RpcError(-32602, "Provide both arenaId and arenaSlotId.");
+        const arena = await arenas.get(arenaId, false);
+        if (arena.workspacePath !== root) throw new RpcError(-32009, "That arena belongs to a different workspace.");
+        const slot = arena.slots.find((item) => item.id === arenaSlotId);
+        if (!slot) throw new RpcError(-32004, "Arena slot not found.");
+        cwd = slot.worktreePath;
+        arenas.recordVerify(arenaId, arenaSlotId, { command, status: "running" });
+        onFinish = (finished) => {
+          arenas.recordVerify(arenaId, arenaSlotId, {
+            command,
+            status: finished.status,
+            exitCode: finished.exitCode,
+            durationMs: finished.finishedAt ? finished.finishedAt - finished.startedAt : undefined,
+            output: finished.output,
+          });
+        };
+      }
+      return verify.start({ workspacePath: root, cwd, command, onFinish });
+    },
+    "verify.get": ({ id }) => verify.get(id),
+    "verify.cancel": ({ id }) => {
+      verify.cancel(id);
+      return null;
+    },
     "prompts.list": () => workspace.listPrompts(),
     "prompts.read": (params) => workspace.readPrompt(params),
     "prompts.write": (params) => workspace.writePrompt(params),
@@ -221,6 +302,13 @@ export function startServer(options: ServerOptions) {
     options.discoverLocalRuntimeModels,
     options.discoverCliModels,
   );
+  const checkpoints = new CheckpointManager(options.dataDir, history);
+  const arenas = new WorktreeArenaManager(options.dataDir, history, {
+    createCheckpoint: (workspacePath, label) => checkpoints.create(workspacePath, { label }),
+  });
+  const verify = new VerifyManager();
+  void arenas.cleanupOrphans().catch(() => undefined);
+
   const listeners = new Map<string, Set<Socket>>();
 
   function deliver(socket: Socket, event: RunEvent) {
@@ -239,8 +327,8 @@ export function startServer(options: ServerOptions) {
     setTimeout(() => socket.close(), 0);
   }
 
-  const runs = new Runs(history, providers, workspace, publish);
-  const handlers = rpcHandlers(history, providers, runs, workspace);
+  const runs = new Runs(history, providers, workspace, publish, checkpoints, arenas);
+  const handlers = rpcHandlers(history, providers, runs, workspace, checkpoints, arenas, verify);
   let stopping = false;
   try {
     const server = Bun.serve<SocketData>({
@@ -328,6 +416,8 @@ export function startServer(options: ServerOptions) {
         if (stopping) return;
         stopping = true;
         await runs.shutdown();
+        await verify.shutdown();
+        await providers.shutdown();
         // Bun 1.3.14 can leave stop() pending after a server-initiated WebSocket close.
         // https://github.com/oven-sh/bun/issues/36223
         await Promise.race([server.stop(true), Bun.sleep(300)]);

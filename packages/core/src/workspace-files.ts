@@ -26,8 +26,10 @@ const protectedNames = new Set([
   ".qwen", ".ssh", "secrets", "credentials", "keychains", "private-keys", ".secrets",
   ".credentials",
 ]);
-const excludedNames = new Set(["node_modules", ".next", ".venv", "__pycache__"]);
-const indexExcludedNames = new Set(["target", "dist", "build"]);
+const excludedNames: ReadonlySet<string> = new Set([
+  "node_modules", ".next", ".venv", "__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini",
+]);
+const indexExcludedNames: ReadonlySet<string> = new Set(["target", "dist", "build"]);
 const sourceExtensions = new Set([
   ".c", ".cc", ".cpp", ".cs", ".cts", ".dart", ".ex", ".exs", ".go", ".h", ".hpp",
   ".java", ".js", ".jsx", ".kt", ".kts", ".lua", ".mjs", ".cjs", ".mts", ".php",
@@ -76,6 +78,23 @@ export function relativePath(path: string, allowEmpty = false): string[] {
 
 export function isProtectedRelativePath(path: string): boolean {
   return protectedPath(relativePath(path), "file");
+}
+
+function isTreeExcludedName(name: string): boolean {
+  return excludedNames.has(name) || name.startsWith(".ide-save-");
+}
+
+export function isIgnoredWorkspaceName(name: string): boolean {
+  return isTreeExcludedName(name) || indexExcludedNames.has(name.toLowerCase());
+}
+
+export function isIndexedWorkspacePath(path: string): boolean {
+  try {
+    return !isProtectedRelativePath(path) && !path.split("/").some(isIgnoredWorkspaceName);
+  } catch (error) {
+    if (error instanceof WorkspaceError && error.code === "INVALID_INPUT") return false;
+    throw error;
+  }
 }
 
 function filesystemError(error: unknown): WorkspaceError {
@@ -174,28 +193,49 @@ async function ensurePromptDirectory(root: string, parts: string[], create: bool
   return path;
 }
 
-export async function listDirectory(root: string, relative: string): Promise<DirectoryEntry[]> {
+async function directoryEntries(root: string, relative: string, indexed: boolean): Promise<DirectoryEntry[]> {
   const parts = relativePath(relative, true);
   const { path, stats } = await walk(root, parts, "directory");
   if (!stats?.isDirectory()) throw new WorkspaceError("INVALID_INPUT", "Choose a folder.");
   const entries = await fs(() => readdir(path, { withFileTypes: true }));
+  if (indexed) {
+    const current = await fs(() => lstat(path));
+    if (!current.isDirectory() || current.dev !== stats.dev || current.ino !== stats.ino) {
+      throw new WorkspaceError("CONFLICT", "The folder changed.");
+    }
+  }
+  const ancestors = path.split(sep);
   const result: DirectoryEntry[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() && !entry.isFile()) continue;
     const kind = entry.isDirectory() ? "directory" : "file";
-    if (excludedNames.has(entry.name) || protectedPath([...path.split(sep), entry.name], kind) ||
-      /[\\\u0000-\u001f\u007f]/u.test(entry.name) || entry.name.startsWith(".ide-save-")) continue;
-    result.push({
-      name: entry.name,
-      path: [...parts, entry.name].join("/"),
-      kind,
-    });
+    const { name } = entry;
+    const child = [...parts, name].join("/");
+    const omitted = indexed ? !isIndexedWorkspacePath(child) : isTreeExcludedName(name) || /[\\\u0000-\u001f\u007f]/u.test(name);
+    if (omitted || protectedPath([...ancestors, name], kind)) continue;
+    result.push({ name, path: child, kind });
   }
+  return result;
+}
+
+export async function listDirectory(root: string, relative: string): Promise<DirectoryEntry[]> {
+  const result = await directoryEntries(root, relative, false);
   if (result.length > MAX_ENTRIES) throw new WorkspaceError("LIMIT", "This folder has too many entries to display.");
   return result.sort((a, b) => a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "directory" ? -1 : 1);
 }
 
-function isSingleLinkFile(stats: Stats | undefined): boolean {
+export async function listIndexedDirectory(root: string, relative: string): Promise<DirectoryEntry[]> {
+  try {
+    const entries = await directoryEntries(root, relative, true);
+    return entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  } catch (error) {
+    if (relative && error instanceof WorkspaceError &&
+      (error.code === "NOT_FOUND" || error.code === "FORBIDDEN" || error.code === "CONFLICT" || error.code === "INVALID_INPUT")) return [];
+    throw error;
+  }
+}
+
+export function isSingleLinkFile(stats: Stats | undefined): stats is Stats {
   return !!stats?.isFile() && (process.platform === "win32" ? stats.nlink <= 1 : stats.nlink === 1);
 }
 
@@ -390,15 +430,18 @@ export async function removeEntry(root: string, relative: string): Promise<void>
   });
 }
 
-export async function workspaceFileExists(root: string, relative: string): Promise<boolean> {
+export async function workspaceEntryKind(root: string, relative: string): Promise<PathKind | undefined> {
   try {
     const { path, stats } = await walk(root, relativePath(relative), "file", true);
-    if (!stats) return false;
-    return checkedKind({ path, stats }) === "file";
+    return stats ? checkedKind({ path, stats }) : undefined;
   } catch (error) {
-    if (error instanceof WorkspaceError && error.code === "NOT_FOUND") return false;
+    if (error instanceof WorkspaceError && error.code === "NOT_FOUND") return undefined;
     throw error;
   }
+}
+
+export async function workspaceFileExists(root: string, relative: string): Promise<boolean> {
+  return (await workspaceEntryKind(root, relative)) === "file";
 }
 
 function matchRank(name: string, path: string, query: string): number | undefined {
@@ -436,7 +479,7 @@ export async function listWorkspaceFiles(root: string, query?: string, limit = 1
         if (++visited > MAX_INDEX_ENTRIES) break;
         if (!entry.isDirectory() && !entry.isFile()) continue;
         const { name } = entry;
-        if (excludedNames.has(name) || indexExcludedNames.has(name.toLowerCase()) || name.startsWith(".ide-save-")) continue;
+        if (isIgnoredWorkspaceName(name)) continue;
         const child = [...parts, name];
         const relative = child.join("/");
         if (relative.length > 4096 || /[\\\u0000-\u001f\u007f]/u.test(name)) continue;

@@ -1,4 +1,4 @@
-import type { EffortLevel } from "@ide/protocol";
+import type { EffortLevel, ExecutionMode } from "@ide/protocol";
 import { lstatSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -81,19 +81,36 @@ export function geminiHasUnmanagedSettings(env: NodeJS.ProcessEnv = process.env)
   }
 }
 
+const geminiReadTools = ["read_file", "list_directory", "glob", "grep_search", "search_file_content"];
+const geminiTools: Record<ExecutionMode, string[]> = {
+  isolated: [],
+  "read-only": geminiReadTools,
+  agent: [...geminiReadTools, "replace", "write_file"],
+};
+
+function geminiToolPolicy(tools: readonly string[]): string {
+  // Gemini CLI accepts priorities from 0 through 999.
+  const allow = tools.length
+    ? `[[rule]]\ntoolName = ${JSON.stringify(tools)}\ndecision = "allow"\npriority = 999\n\n`
+    : "";
+  return `${allow}[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = ${tools.length ? 998 : 999}\n`;
+}
+
 export async function geminiCliInvocation(
-  directory: string,
+  scratchDir: string,
   protocol: "stream-json" | "acp" = "stream-json",
   effort?: EffortLevel,
+  accessMode: ExecutionMode = "isolated",
 ) {
-  const settingsPath = join(directory, "settings.json");
-  const policyPath = join(directory, "uya-read-only.toml");
+  const settingsPath = join(scratchDir, "settings.json");
+  const policyPath = join(scratchDir, "uya-read-only.toml");
   const disabledName = `uya-disabled-${crypto.randomUUID()}`;
+  const tools = geminiTools[accessMode];
   const settings = {
     hooksConfig: { enabled: false },
     mcp: { serverCommand: "" },
     context: { fileName: `${disabledName}.md`, includeDirectoryTree: false, loadMemoryFromIncludeDirectories: false },
-    tools: { core: [disabledName], allowed: [], discoveryCommand: "", callCommand: "" },
+    tools: { core: tools.length ? tools : [disabledName], allowed: [], discoveryCommand: "", callCommand: "" },
     skills: { enabled: false },
     ide: { enabled: false },
     experimental: { enableAgents: false, adk: { agentSessionNoninteractiveEnabled: false } },
@@ -101,10 +118,9 @@ export async function geminiCliInvocation(
     privacy: { usageStatisticsEnabled: false },
     modelConfigs: geminiCliModelConfigs(effort),
   };
-  const policy = '[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = 999\n';
   await Promise.all([
     writeFile(settingsPath, JSON.stringify(settings), { mode: 0o600 }),
-    writeFile(policyPath, policy, { mode: 0o600 }),
+    writeFile(policyPath, geminiToolPolicy(tools), { mode: 0o600 }),
   ]);
   return {
     settingsPath,

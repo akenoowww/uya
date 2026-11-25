@@ -1,20 +1,29 @@
 import { execFile } from "node:child_process";
-import type { GitDiffResult, GitFileStatus, GitStatus } from "@ide/protocol";
+import { lstat, unlink } from "node:fs/promises";
+import { devNull } from "node:os";
+import { join } from "node:path";
+import type { GitBranch, GitCommit, GitCommitResult, GitDiffResult, GitFileStatus, GitStatus } from "@ide/protocol";
 import {
   canonicalDirectory,
   isProtectedRelativePath,
   MAX_TEXT_BYTES,
   readText,
+  relativePath,
   WorkspaceError,
   workspaceFileExists,
 } from "./workspace-files";
 
 const MAX_GIT_OUTPUT = 2 * 1024 * 1024;
 const MAX_DIFF_BYTES = 512 * 1024;
+const MAX_PATHSPEC_BYTES = 16 * 1024;
 const DIFF_TRUNCATED = "\n[Diff truncated at 512 KiB]\n";
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const gitFlags = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+const gitFlags = [
+  "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false",
+  "-c", `core.hooksPath=${devNull}`, "-c", "maintenance.auto=false",
+];
 const diffFlags = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--ignore-submodules=all"];
+const rawDiffFlags = [...diffFlags, "--raw", "-z"];
 const gitLocalEnv = new Set([
   "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
@@ -31,10 +40,10 @@ type GitOutput = { stdout: Buffer; truncated: boolean };
 type Repository = {
   root: string;
   prefix: string;
-  run: (args: string[], allowTruncation?: boolean) => Promise<GitOutput>;
+  run: (args: string[], allowTruncation?: boolean, input?: string) => Promise<GitOutput>;
 };
 
-function runGit(root: string, args: string[], allowTruncation = false): Promise<GitOutput> {
+function runGit(root: string, args: string[], allowTruncation = false, input?: string): Promise<GitOutput> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
@@ -46,13 +55,17 @@ function runGit(root: string, args: string[], allowTruncation = false): Promise<
     if (gitLocalEnv.has(name.toUpperCase())) delete env[name];
   }
   return new Promise((resolve, reject) => {
-    execFile("git", [...gitFlags, ...args], {
+    const child = execFile("git", [...gitFlags, ...args], {
       cwd: root, timeout: 8000, maxBuffer: MAX_GIT_OUTPUT, encoding: "buffer", env,
     }, (error, stdout) => {
       if (!error) resolve({ stdout, truncated: false });
       else if (allowTruncation && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") resolve({ stdout, truncated: true });
       else reject(new GitError(error.code));
     });
+    if (input !== undefined) {
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(input);
+    }
   });
 }
 
@@ -76,7 +89,7 @@ function* nulRecords(bytes: Buffer): Generator<Buffer> {
 async function filterOverrides(root: string): Promise<string[]> {
   let stdout: Buffer;
   try {
-    ({ stdout } = await runGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process|required)$"]));
+    ({ stdout } = await runGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"]));
   } catch (error) {
     if (error instanceof GitError && error.exitCode === 1) return [];
     throw error;
@@ -105,7 +118,7 @@ async function repositoryFor(input: string): Promise<Repository | undefined> {
   if (!workTree) return undefined;
   const prefix = probe!.slice(workTree[0].length).replace(/\r?\n$/u, "");
   const overrides = await filterOverrides(root);
-  return { root, prefix, run: (args, allowTruncation) => runGit(root, [...overrides, ...args], allowTruncation) };
+  return { root, prefix, run: (args, allowTruncation, input) => runGit(root, [...overrides, ...args], allowTruncation, input) };
 }
 
 function workspacePath(repository: Repository, gitPath: string | undefined): string | undefined {
@@ -184,34 +197,56 @@ export async function gitStatus(root: string): Promise<GitStatus> {
   return result;
 }
 
-function exactPathspec(path: string): string {
+function exactPathspec(path: string, ignoreCase = false): string {
   // Force a wildcard match so Git does not also match the path as a directory prefix.
   // Escaping the first character and any glob syntax makes that match exact.
-  return ":(top,glob)" + path.replace(/^.|[\\*?[\]]/gu, "\\$&");
+  return (ignoreCase ? ":(top,glob,icase)" : ":(top,glob)") + path.replace(/^.|[\\*?[\]]/gu, "\\$&");
+}
+
+function* pathspecBatches(pathspecs: Iterable<string>): Generator<string[]> {
+  let batch: string[] = [];
+  let bytes = 0;
+  for (const pathspec of pathspecs) {
+    const size = Buffer.byteLength(pathspec) + 1;
+    if (batch.length && bytes + size > MAX_PATHSPEC_BYTES) {
+      yield batch;
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(pathspec);
+    bytes += size;
+  }
+  if (batch.length) yield batch;
+}
+
+function* rawChanges(stdout: Buffer) {
+  const records = nulRecords(stdout);
+  for (const header of records) {
+    const entry = /^:([0-7]{6}) ([0-7]{6}) [^ ]+ [^ ]+ ([A-Z])\d*$/u.exec(header.toString("ascii"));
+    if (!entry) throw new GitError();
+    const paths = [decode(records.next().value)];
+    if (entry[3] === "R" || entry[3] === "C") paths.push(decode(records.next().value));
+    yield { paths, regular: entry.slice(1, 3).every(regularOrMissingMode) };
+  }
 }
 
 async function changedPaths(repository: Repository, staged: boolean, path?: string) {
-  const args = [...diffFlags, "--raw", "-z", staged ? "--find-renames=100%" : "--no-renames"];
+  const args = [...rawDiffFlags, staged ? "--find-renames=100%" : "--no-renames"];
   if (staged) args.push("--cached");
   else args.push("--", path === undefined ? "." : exactPathspec(repository.prefix + path));
-  const records = nulRecords((await repository.run(args)).stdout);
   const paths = new Set<string>();
   const blocked = new Set<string>();
-  for (const header of records) {
-    const entry = /^:([0-7]{6}) ([0-7]{6}) [^ ]+ [^ ]+ ([A-Z])\d*$/u.exec(header.toString("ascii"));
-    const first = workspacePath(repository, decode(records.next().value));
-    if (!entry) throw new GitError();
-    const regular = entry.slice(1, 3).every(regularOrMissingMode);
-    if (entry[3] === "R" || entry[3] === "C") {
-      const second = workspacePath(repository, decode(records.next().value));
-      if (!regular || !first || !second) {
+  for (const change of rawChanges((await repository.run(args)).stdout)) {
+    const [first, second] = change.paths.map((name) => workspacePath(repository, name));
+    if (change.paths.length === 2) {
+      if (!change.regular || !first || !second) {
         if (first) blocked.add(first);
         if (second) blocked.add(second);
         continue;
       }
       paths.add(second);
     }
-    if (first && regular) paths.add(first);
+    if (first && change.regular) paths.add(first);
   }
   return { paths, blocked };
 }
@@ -230,14 +265,7 @@ async function patchFor(repository: Repository, paths: string[], staged: boolean
   if (staged) args.push("--cached");
   const pathspecs = paths.map((path) => exactPathspec(repository.prefix + path));
   let diff = "";
-  for (let index = 0; index < pathspecs.length;) {
-    const batch: string[] = [];
-    let bytes = 0;
-    do {
-      const pathspec = pathspecs[index++]!;
-      batch.push(pathspec);
-      bytes += Buffer.byteLength(pathspec) + 1;
-    } while (index < pathspecs.length && bytes + Buffer.byteLength(pathspecs[index]!) < 16 * 1024);
+  for (const batch of pathspecBatches(pathspecs)) {
     const { stdout, truncated } = await repository.run([...args, "--", ...batch], true);
     diff += stdout.toString("utf8");
     if (truncated || Buffer.byteLength(diff) > MAX_DIFF_BYTES) return boundedDiff(diff, true);
@@ -334,4 +362,334 @@ export async function gitDiff(root: string, { path, staged = false }: { path?: s
     result.diff = boundedDiff(untrackedPatch(repository.prefix + path, modified.text));
   }
   return result;
+}
+
+type FileSelection = { paths?: string[]; all?: boolean };
+
+async function requireRepository(root: string): Promise<Repository> {
+  const repository = await repositoryFor(root);
+  if (!repository) throw new WorkspaceError("INVALID_INPUT", "This folder is not a Git repository.");
+  return repository;
+}
+
+let pendingMutation: Promise<void> = Promise.resolve();
+
+function mutateGit<T>(root: string, operation: (repository: Repository) => Promise<T>): Promise<T> {
+  // Keep index and worktree preflight and the resulting status together across Uya calls.
+  const result = pendingMutation.then(async () => operation(await requireRepository(root)));
+  pendingMutation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function checkWorktreePath(repository: Repository, path: string): Promise<boolean> {
+  relativePath(path);
+  if (workspacePath(repository, repository.prefix + path) === undefined) {
+    throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+  }
+  return workspaceFileExists(repository.root, path);
+}
+
+async function checkedSelection(repository: Repository, { paths, all }: FileSelection, message: string): Promise<Set<string>> {
+  const selected = new Set(paths);
+  if (!all && !selected.size) throw new WorkspaceError("INVALID_INPUT", message);
+  for (const path of selected) await checkWorktreePath(repository, path);
+  return selected;
+}
+
+async function runPathCommand(repository: Repository, args: string[], paths: string[]): Promise<void> {
+  if (!paths.length) return;
+  const pathspecs = paths.map((path) => exactPathspec(repository.prefix + path));
+  const input = pathspecs.join("\0") + "\0";
+  if (Buffer.byteLength(input) <= MAX_PATHSPEC_BYTES) {
+    await repository.run([...args, "--", ...pathspecs]);
+  } else {
+    // Keep large selections in one index transaction without exceeding argv limits.
+    await repository.run([...args, "--pathspec-from-file=-", "--pathspec-file-nul", "--"], false, input);
+  }
+}
+
+function pathParents(path: string): string[] {
+  const parents: string[] = [];
+  for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
+    parents.push(path.slice(0, slash));
+  }
+  return parents;
+}
+
+async function safeIndexPaths(repository: Repository, paths: string[]): Promise<Set<string>> {
+  const pathspecs = new Set<string>();
+  for (const path of paths) {
+    const name = repository.prefix + path;
+    pathspecs.add(":(top,literal,icase)" + name);
+    for (const parent of pathParents(name)) pathspecs.add(exactPathspec(parent, true));
+  }
+  const unsafe = new Set<string>();
+  const unsafeParents = new Set<string>();
+  for (const batch of pathspecBatches(pathspecs)) {
+    const { stdout } = await repository.run(["ls-files", "--full-name", "--stage", "-z", "--", ...batch]);
+    for (const record of nulRecords(stdout)) {
+      const tab = record.indexOf(0x09);
+      if (tab < 0) throw new GitError();
+      const bytes = record.subarray(tab + 1);
+      const name = decode(bytes);
+      if (regularMode(record.toString("ascii", 0, 6)) && workspacePath(repository, name) !== undefined) continue;
+      const key = (name ?? bytes.toString("utf8")).toLowerCase();
+      unsafe.add(key);
+      for (const parent of pathParents(key)) unsafeParents.add(parent);
+    }
+  }
+  // Git can remove a conflicting index entry even when the pathspec itself is exact.
+  return new Set(paths.filter((path) => {
+    const key = (repository.prefix + path).toLowerCase();
+    return !unsafe.has(key) && !unsafeParents.has(key) && !pathParents(key).some((parent) => unsafe.has(parent));
+  }));
+}
+
+async function checkRenameSelection(repository: Repository, selected: Set<string>): Promise<Set<string>> {
+  const { blocked } = await changedPaths(repository, true);
+  for (const path of selected) {
+    if (blocked.has(path)) throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+  }
+  return blocked;
+}
+
+export function gitStage(root: string, options: FileSelection): Promise<GitStatus> {
+  return mutateGit(root, async (repository) => {
+    const selected = await checkedSelection(repository, options, "Choose files to stage.");
+    const blocked = await checkRenameSelection(repository, selected);
+    const paths = options.all
+      ? (await gitStatus(repository.root)).changes.filter((change) => !change.staged).map((change) => change.path)
+      : [...selected];
+    const candidates = paths.filter((path) => !blocked.has(path));
+    const safe = await safeIndexPaths(repository, candidates);
+    if (candidates.some((path) => selected.has(path) && !safe.has(path))) {
+      throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+    }
+    await runPathCommand(repository, ["add", "--no-ignore-errors"], [...safe]);
+    return gitStatus(repository.root);
+  });
+}
+
+async function cachedChanges(repository: Repository, ...flags: string[]) {
+  const { stdout } = await repository.run([...rawDiffFlags, "--cached", "--ignore-submodules=none", ...flags, "--"]);
+  return rawChanges(stdout);
+}
+
+async function unstagePaths(repository: Repository, selected: Set<string>, all: boolean): Promise<string[]> {
+  const groups: { paths: string[]; explicit: boolean }[] = [];
+  const changes = await cachedChanges(repository, "--find-renames=100%");
+  for (const change of changes) {
+    const paths = change.paths.map((path) => workspacePath(repository, path)).filter((path) => path !== undefined);
+    const explicit = paths.some((path) => selected.has(path));
+    if (!all && !explicit) continue;
+    const safe = change.regular && paths.length === change.paths.length &&
+      (await Promise.all(paths.map((path) => canShowPath(repository.root, path)))).every(Boolean);
+    if (!safe && explicit) throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+    if (safe) groups.push({ paths, explicit });
+  }
+  const safe = await safeIndexPaths(repository, groups.flatMap(({ paths }) => paths));
+  const result = new Set<string>();
+  for (const group of groups) {
+    if (group.paths.every((path) => safe.has(path))) {
+      for (const path of group.paths) result.add(path);
+    } else if (group.explicit) {
+      throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+    }
+  }
+  return [...result];
+}
+
+async function gitSucceeds(repository: Repository, args: string[]): Promise<boolean> {
+  try {
+    await repository.run(args);
+    return true;
+  } catch (error) {
+    if (error instanceof GitError && error.exitCode === 1) return false;
+    throw error;
+  }
+}
+
+function hasHead(repository: Repository): Promise<boolean> {
+  return gitSucceeds(repository, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+}
+
+export function gitUnstage(root: string, options: FileSelection): Promise<GitStatus> {
+  return mutateGit(root, async (repository) => {
+    const selected = await checkedSelection(repository, options, "Choose files to unstage.");
+    const paths = await unstagePaths(repository, selected, options.all === true);
+    if (paths.length) {
+      const args = await hasHead(repository)
+        ? ["restore", "--staged"]
+        : ["rm", "--cached", "--quiet", "--force"];
+      await runPathCommand(repository, args, paths);
+    }
+    return gitStatus(repository.root);
+  });
+}
+
+async function checkRestoreTarget(repository: Repository, path: string): Promise<void> {
+  if (await checkWorktreePath(repository, path)) return;
+  try {
+    await lstat(join(repository.root, path));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return;
+    if (code !== "ENOTDIR") throw new WorkspaceError("IO", "Git could not inspect the file to discard.");
+  }
+  // Git restore can remove an obstructing directory or parent file.
+  throw new WorkspaceError("CONFLICT", "Another file or folder is in the way of restoring this path.");
+}
+
+async function discardUntracked(repository: Repository, path: string): Promise<void> {
+  if (!(await checkWorktreePath(repository, path))) {
+    throw new WorkspaceError("CONFLICT", "The file changed before it could be discarded.");
+  }
+  try {
+    await unlink(join(repository.root, path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new WorkspaceError("IO", "Git could not remove the untracked file.");
+    }
+  }
+}
+
+export function gitDiscard(root: string, paths: string[]): Promise<GitStatus> {
+  return mutateGit(root, async (repository) => {
+    const selected = await checkedSelection(repository, { paths }, "Choose files to discard.");
+    await checkRenameSelection(repository, selected);
+    const changes = (await gitStatus(repository.root)).changes.filter((change) => !change.staged && selected.has(change.path));
+    const tracked = changes.filter((change) => change.status !== "untracked").map((change) => change.path);
+    for (const path of tracked) await checkRestoreTarget(repository, path);
+    await runPathCommand(repository, ["restore", "--worktree", "--no-recurse-submodules"], tracked);
+    for (const change of changes) {
+      if (change.status === "untracked") await discardUntracked(repository, change.path);
+    }
+    return gitStatus(repository.root);
+  });
+}
+
+async function checkTreeChanges(repository: Repository, changes: ReturnType<typeof rawChanges>): Promise<boolean> {
+  let changed = false;
+  for (const change of changes) {
+    changed = true;
+    for (const name of change.paths) {
+      const path = workspacePath(repository, name);
+      if (path === undefined || !change.regular) throw new WorkspaceError("FORBIDDEN", "This path is protected.");
+      await workspaceFileExists(repository.root, path);
+    }
+  }
+  return changed;
+}
+
+const localBranchPrefix = "refs/heads/";
+
+async function currentBranch(repository: Repository): Promise<string> {
+  try {
+    const { stdout } = await repository.run(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"]);
+    return stdout.toString("utf8").trimEnd().slice(localBranchPrefix.length);
+  } catch (error) {
+    if (error instanceof GitError && error.exitCode === 1) return "HEAD";
+    throw error;
+  }
+}
+
+async function readLog(repository: Repository, limit: number): Promise<GitCommit[]> {
+  const { stdout } = await repository.run([
+    "log", "-z", "-n", String(limit), "--no-show-signature", "--no-notes", "--encoding=UTF-8",
+    "--format=%H%x00%h%x00%s%x00%an%x00%aI%x1e", "HEAD", "--",
+  ]);
+  const fields = stdout.toString("utf8").split("\0");
+  const commits: GitCommit[] = [];
+  for (let start = 0; start + 4 < fields.length; start += 5) {
+    const [hash, shortHash, subject, author, date] = fields.slice(start, start + 5);
+    if (!hash || !shortHash || !date.endsWith("\x1e")) throw new GitError();
+    commits.push({ hash, shortHash, subject, author, date: date.slice(0, -1) });
+  }
+  return commits;
+}
+
+export function gitCommit(root: string, message: string): Promise<GitCommitResult> {
+  return mutateGit(root, async (repository) => {
+    const text = message.trim();
+    if (!text || text.includes("\0")) throw new WorkspaceError("INVALID_INPUT", "Enter a valid commit message.");
+    const staged = await cachedChanges(repository, "--no-renames", "--ita-invisible-in-index");
+    if (!(await checkTreeChanges(repository, staged))) {
+      throw new WorkspaceError("CONFLICT", "There are no staged changes to commit.");
+    }
+    await repository.run(["commit", "--quiet", "--no-gpg-sign", "--cleanup=verbatim", "-m", text]);
+    const [commit] = await readLog(repository, 1);
+    if (!commit) throw new GitError();
+    return { hash: commit.hash, shortHash: commit.shortHash, branch: await currentBranch(repository), subject: commit.subject };
+  });
+}
+
+export async function gitBranches(root: string): Promise<GitBranch[]> {
+  const repository = await requireRepository(root);
+  const { stdout } = await repository.run([
+    "for-each-ref", "--format=%(HEAD)%00%(refname:lstrip=2)%00%(upstream:short)%00%(objectname:short)", localBranchPrefix,
+  ]);
+  const output = decode(stdout);
+  if (output === undefined) throw new GitError();
+  const branches = output.split("\n").filter(Boolean).map((line) => {
+    const [head, name, upstream, commit] = line.split("\0");
+    return { name, current: head === "*", ...(upstream ? { upstream } : {}), ...(commit ? { commit } : {}) };
+  });
+  return branches.sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name));
+}
+
+async function checkedBranchRef(repository: Repository, name: string): Promise<string> {
+  const ref = localBranchPrefix + name;
+  if (!name || name.startsWith("-") || name === "HEAD" || name === "@" || name.includes("\0") ||
+      !(await gitSucceeds(repository, ["check-ref-format", ref]))) {
+    throw new WorkspaceError("INVALID_INPUT", "Invalid Git branch name.");
+  }
+  return ref;
+}
+
+function branchExists(repository: Repository, ref: string): Promise<boolean> {
+  return gitSucceeds(repository, ["show-ref", "--verify", "--quiet", "--", ref]);
+}
+
+const switchFlags = ["switch", "--no-guess", "--no-recurse-submodules", "--no-overwrite-ignore"];
+
+export function gitCheckout(root: string, branch: string): Promise<GitStatus> {
+  return mutateGit(root, async (repository) => {
+    const ref = await checkedBranchRef(repository, branch);
+    if (!(await branchExists(repository, ref))) {
+      throw new WorkspaceError("NOT_FOUND", "That local branch does not exist.");
+    }
+    const base = await hasHead(repository) ? "HEAD" :
+      (await repository.run(["hash-object", "-t", "tree", "--stdin"], false, "")).stdout.toString("ascii").trim();
+    const { stdout } = await repository.run([...rawDiffFlags, "--ignore-submodules=none", "--no-renames", base, ref, "--"]);
+    await checkTreeChanges(repository, rawChanges(stdout));
+    if (!(await gitSucceeds(repository, [...switchFlags, "--", branch]))) {
+      throw new WorkspaceError("CONFLICT", "Local changes prevent switching to that branch.");
+    }
+    return gitStatus(repository.root);
+  });
+}
+
+export function gitCreateBranch(root: string, name: string, checkout = true): Promise<GitStatus> {
+  return mutateGit(root, async (repository) => {
+    const ref = await checkedBranchRef(repository, name);
+    if (await branchExists(repository, ref)) {
+      throw new WorkspaceError("CONFLICT", "That branch already exists.");
+    }
+    try {
+      await repository.run(checkout !== false ? [...switchFlags, "-c", name] : ["branch", "--", name]);
+    } catch (error) {
+      if (error instanceof GitError && await branchExists(repository, ref)) {
+        throw new WorkspaceError("CONFLICT", "That branch already exists.");
+      }
+      throw error;
+    }
+    return gitStatus(repository.root);
+  });
+}
+
+export async function gitLog(root: string, limit = 25): Promise<GitCommit[]> {
+  const repository = await requireRepository(root);
+  if (!(await hasHead(repository))) return [];
+  const count = Math.max(1, Math.min(100, Math.trunc(Number.isNaN(limit) ? 25 : limit)));
+  return readLog(repository, count);
 }

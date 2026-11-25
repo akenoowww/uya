@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { gitDiff, gitStatus } from "./git";
+import { gitBranches, gitCheckout, gitCommit, gitCreateBranch, gitDiff, gitDiscard, gitLog, gitStage, gitStatus, gitUnstage } from "./git";
 
 let root: string;
 
@@ -269,5 +269,321 @@ describe("Git path protection", () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("git stage and unstage", () => {
+  test("stages exact paths and unstages index changes with working edits intact", async () => {
+    const name = "-note [x].md";
+    await commitFiles({ [name]: "baseline\n", "removed.md": "baseline\n", "-note x.md": "baseline\n" });
+    await writeFile(join(root, name), "index\n");
+    await writeFile(join(root, "-note x.md"), "different file\n");
+    await rm(join(root, "removed.md"));
+    expect((await gitStage(root, { paths: [name, "removed.md"] })).changes).toEqual([
+      { path: name, status: "modified", staged: true },
+      { path: "-note x.md", status: "modified", staged: false },
+      { path: "removed.md", status: "deleted", staged: true },
+    ]);
+    await writeFile(join(root, name), "working edit\n");
+    expect((await gitUnstage(root, { paths: [name] })).changes).toContainEqual({ path: name, status: "modified", staged: false });
+    expect(git("diff", "--cached", "--name-only").trim()).toBe("removed.md");
+    await gitUnstage(root, { all: true });
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+    expect(await readFile(join(root, name), "utf8")).toBe("working edit\n");
+  });
+
+  test("stages all eligible files in a nested workspace and excludes protected files", async () => {
+    await mkdir(join(root, "project"));
+    await commitFiles({ "project/note.md": "baseline\n", "outside.md": "baseline\n" });
+    const workspace = join(root, "project");
+    await writeFile(join(workspace, "note.md"), "updated\n");
+    await writeFile(join(workspace, ".env"), "SYNTHETIC_FIXTURE=local\n");
+    await writeFile(join(workspace, ".env.example"), "PUBLIC_SAMPLE=true\n");
+    await writeFile(join(root, "outside.md"), "outside edit\n");
+    expect((await gitStage(workspace, { all: true })).changes).toEqual([
+      { path: ".env.example", status: "added", staged: true },
+      { path: "note.md", status: "modified", staged: true },
+    ]);
+    expect(git("diff", "--cached", "--name-only").trim().split("\n")).toEqual(["project/.env.example", "project/note.md"]);
+    await gitUnstage(workspace, { all: true });
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+  });
+
+  test("leaves protected index entries in place during file and directory replacements", async () => {
+    await mkdir(join(root, "folder"));
+    await commitFiles({ "folder/.env": "SYNTHETIC_FIXTURE=local\n", "safe.md": "baseline\n" });
+    await rm(join(root, "folder"), { recursive: true });
+    await writeFile(join(root, "folder"), "replacement\n");
+    await writeFile(join(root, "safe.md"), "edited\n");
+    await expect(gitStage(root, { paths: ["safe.md", "folder"] })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+    await gitStage(root, { all: true });
+    expect(git("diff", "--cached", "--name-only").trim()).toBe("safe.md");
+    expect(git("ls-files", "folder/.env").trim()).toBe("folder/.env");
+  });
+
+  test("unstages an unborn branch even when the working file differs from its staged contents", async () => {
+    await writeFile(join(root, ".env"), "SYNTHETIC_FIXTURE=local\n");
+    await writeFile(join(root, "a.md"), "staged\n");
+    await writeFile(join(root, "b.md"), "staged\n");
+    await gitStage(root, { all: true });
+    expect(git("ls-files").trim().split("\n")).toEqual(["a.md", "b.md"]);
+    git("add", "--", ".env");
+    await writeFile(join(root, "a.md"), "working edit\n");
+    await gitUnstage(root, { paths: ["a.md"] });
+    expect(git("ls-files").trim().split("\n")).toEqual([".env", "b.md"]);
+    await gitUnstage(root, { all: true });
+    expect(git("ls-files").trim()).toBe(".env");
+    expect(await readFile(join(root, "a.md"), "utf8")).toBe("working edit\n");
+  });
+
+  test("unstages both endpoints of a rename and protects renames with a restricted endpoint", async () => {
+    await commitFiles({ "before.md": "public\n", ".env": "SYNTHETIC_FIXTURE=local\n" });
+    git("mv", "--", "before.md", "after.md");
+    git("mv", "--", ".env", "restricted-rename.md");
+    await expect(gitUnstage(root, { paths: ["restricted-rename.md"] })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const status = await gitUnstage(root, { paths: ["after.md"] });
+    expect(status.changes).toContainEqual({ path: "before.md", status: "deleted", staged: false });
+    expect(status.changes).toContainEqual({ path: "after.md", status: "untracked", staged: false });
+    expect(git("diff", "--cached", "--no-renames", "--name-only").trim().split("\n")).toEqual([".env", "restricted-rename.md"]);
+  });
+
+  test("handles an all-files selection beyond the command argument budget", async () => {
+    const names = Array.from({ length: 110 }, (_, index) => `note-${index}-${"x".repeat(150)}.md`);
+    await Promise.all(names.map((name) => writeFile(join(root, name), "fixture\n")));
+    expect((await gitStage(root, { all: true })).changes.filter((change) => change.staged)).toHaveLength(names.length);
+    expect((await gitUnstage(root, { all: true })).changes.filter((change) => !change.staged)).toHaveLength(names.length);
+    expect(git("ls-files")).toBe("");
+  });
+});
+
+describe("git discard", () => {
+  test("restores tracked files from the index and removes only selected untracked files", async () => {
+    await commitFiles({ "edited.md": "baseline\n", "removed.md": "baseline\n" });
+    await writeFile(join(root, "edited.md"), "staged edit\n");
+    await gitStage(root, { paths: ["edited.md"] });
+    await writeFile(join(root, "edited.md"), "working edit\n");
+    await rm(join(root, "removed.md"));
+    await writeFile(join(root, "untracked.md"), "temporary\n");
+    await writeFile(join(root, "keep.md"), "keep\n");
+
+    expect((await gitDiscard(root, ["edited.md", "removed.md", "untracked.md"])).changes).toEqual([
+      { path: "edited.md", status: "modified", staged: true },
+      { path: "keep.md", status: "untracked", staged: false },
+    ]);
+    expect(await readFile(join(root, "edited.md"), "utf8")).toBe("staged edit\n");
+    expect(await readFile(join(root, "removed.md"), "utf8")).toBe("baseline\n");
+    await expect(access(join(root, "untracked.md"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(root, "keep.md"), "utf8")).toBe("keep\n");
+  });
+
+  test("rejects restoring a path occupied by a directory", async () => {
+    await commitFiles({ "note.md": "baseline\n" });
+    await rm(join(root, "note.md"));
+    await mkdir(join(root, "note.md"));
+    await writeFile(join(root, "note.md", ".env"), "SYNTHETIC_FIXTURE=local\n");
+    await expect(gitDiscard(root, ["note.md"])).rejects.toMatchObject({ code: "CONFLICT" });
+    await access(join(root, "note.md", ".env"));
+  });
+
+  test("keeps a concurrently staged file on disk when discard runs after staging", async () => {
+    await writeFile(join(root, "note.md"), "fixture\n");
+    const [staged, discarded] = await Promise.all([
+      gitStage(root, { paths: ["note.md"] }),
+      gitDiscard(root, ["note.md"]),
+    ]);
+    expect(staged.changes).toEqual([{ path: "note.md", status: "added", staged: true }]);
+    expect(discarded).toEqual(staged);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("fixture\n");
+  });
+});
+
+describe("Git mutation path validation", () => {
+  test("validates the full selection before any mutation", async () => {
+    await mkdir(join(root, "nested"));
+    await writeFile(join(root, "note.md"), "fixture\n");
+    await writeFile(join(root, "nested", "child.md"), "fixture\n");
+    await link(join(root, "note.md"), join(root, "hardlink.md"));
+    await symlink(join(root, "nested"), join(root, "alias"), "dir");
+    await symlink(join(root, "nested", "child.md"), join(root, "symlink.md"), "file");
+    await writeFile(join(root, "safe.md"), "fixture\n");
+
+    for (const mutate of [
+      (paths: string[]) => gitStage(root, { paths }),
+      (paths: string[]) => gitUnstage(root, { paths }),
+      (paths: string[]) => gitDiscard(root, paths),
+    ]) {
+      await expect(mutate([])).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(mutate(["safe.md", "../outside.md"])).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(mutate(["safe.md", ".env"])).rejects.toMatchObject({ code: "FORBIDDEN", message: "This path is protected." });
+      for (const path of ["hardlink.md", "alias/child.md", "symlink.md"]) {
+        await expect(mutate(["safe.md", path])).rejects.toMatchObject({ code: "FORBIDDEN" });
+      }
+    }
+    await expect(gitStage(root, { all: true, paths: [".env"] })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(git("ls-files")).toBe("");
+    expect(await readFile(join(root, "safe.md"), "utf8")).toBe("fixture\n");
+  });
+
+  test("requires a Git worktree for mutations and history inspection", async () => {
+    const plain = await realpath(await mkdtemp(join(tmpdir(), "uya-plain-")));
+    try {
+      await expect(gitStage(plain, { all: true })).rejects.toMatchObject({
+        code: "INVALID_INPUT", message: "This folder is not a Git repository.",
+      });
+      await expect(gitUnstage(plain, { all: true })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitDiscard(plain, ["note.md"])).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitCommit(plain, "Fixture")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitBranches(plain)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitCheckout(plain, "main")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitCreateBranch(plain, "topic")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitLog(plain)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("git commit", () => {
+  test("returns actual commit metadata and bypasses configured hooks and signing", async () => {
+    git("config", "--local", "user.name", "Uya Fixture");
+    git("config", "--local", "user.email", "fixture@example.test");
+    git("config", "--local", "commit.gpgSign", "true");
+    git("config", "--local", "gpg.program", "uya-fixture-gpg-does-not-exist");
+    git("config", "--local", "commit.cleanup", "strip");
+    const hooks = join(root, ".git", "hooks");
+    await mkdir(hooks);
+    git("config", "--local", "core.hooksPath", hooks);
+    await writeFile(join(hooks, "prepare-commit-msg"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await writeFile(join(root, "note.md"), "fixture\n");
+    await gitStage(root, { all: true });
+    const result = await gitCommit(root, "  # Fixture subject \n\nBody\n ");
+    expect(result).toEqual({
+      hash: git("rev-parse", "HEAD").trim(),
+      shortHash: git("rev-parse", "--short", "HEAD").trim(),
+      branch: "main",
+      subject: "# Fixture subject",
+    });
+    expect((await gitStatus(root)).changes).toEqual([]);
+  });
+
+  test("rejects empty or NUL messages, unstaged work and protected staged paths", async () => {
+    await expect(gitCommit(root, " \n ")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(gitCommit(root, "fixture\0message")).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await writeFile(join(root, "untracked.md"), "fixture\n");
+    await expect(gitCommit(root, "Fixture")).rejects.toMatchObject({
+      code: "CONFLICT", message: "There are no staged changes to commit.",
+    });
+    git("add", "-N", "--", "untracked.md");
+    await expect(gitCommit(root, "Fixture")).rejects.toMatchObject({ code: "CONFLICT" });
+    await writeFile(join(root, ".env"), "SYNTHETIC_FIXTURE=local\n");
+    git("add", "--", ".env");
+    await expect(gitCommit(root, "Fixture")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(git("diff", "--cached", "--name-only")).toContain(".env");
+  });
+});
+
+describe("git branches and checkout", () => {
+  test("creates and lists local branches with the current branch first and exact names", async () => {
+    expect(await gitBranches(root)).toEqual([]);
+    await commitFiles({ "note.md": "fixture\n" });
+    const commit = git("rev-parse", "--short", "HEAD").trim();
+    expect((await gitCreateBranch(root, "zeta", false)).branch).toBe("main");
+    expect((await gitCreateBranch(root, "alpha")).branch).toBe("alpha");
+    git("branch", "--set-upstream-to=main", "alpha");
+    git("tag", "zeta");
+    expect(await gitBranches(root)).toEqual([
+      { name: "alpha", current: true, upstream: "main", commit },
+      { name: "main", current: false, commit },
+      { name: "zeta", current: false, commit },
+    ]);
+    await expect(gitCreateBranch(root, "zeta")).rejects.toMatchObject({ code: "CONFLICT", message: "That branch already exists." });
+    expect((await gitCheckout(root, "zeta")).branch).toBe("zeta");
+  });
+
+  test("switches to a local branch and reports a dirty worktree conflict", async () => {
+    await commitFiles({ "note.md": "main version\n" });
+    await gitCreateBranch(root, "topic");
+    await commitFiles({ "note.md": "topic version\n" });
+    expect((await gitCheckout(root, "main")).branch).toBe("main");
+    await writeFile(join(root, "note.md"), "dirty local edit\n");
+    await expect(gitCheckout(root, "topic")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await gitStatus(root)).branch).toBe("main");
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("dirty local edit\n");
+    await gitDiscard(root, ["note.md"]);
+    expect((await gitCheckout(root, "topic")).branch).toBe("topic");
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("topic version\n");
+  });
+
+  test("validates branch names and refuses remote and tag fallbacks", async () => {
+    await commitFiles({ "note.md": "fixture\n" });
+    git("update-ref", "refs/remotes/origin/remote-only", "HEAD");
+    git("tag", "tag-only");
+    for (const name of ["--detach", "bad..name", "@{-1}", "HEAD", "with space", "nul\0name"]) {
+      await expect(gitCheckout(root, name)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+      await expect(gitCreateBranch(root, name)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    }
+    for (const name of ["remote-only", "tag-only"]) {
+      await expect(gitCheckout(root, name)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+  });
+
+  test("refuses to check out a protected file and preserves ignored local files", async () => {
+    await commitFiles({ ".gitignore": "local.md\n" });
+    git("switch", "-q", "-c", "protected");
+    await commitFiles({ ".env": "SYNTHETIC_FIXTURE=tracked\n" });
+    git("switch", "-q", "main");
+    git("switch", "-q", "-c", "ignored");
+    await writeFile(join(root, "local.md"), "branch version\n");
+    git("add", "-f", "--", "local.md");
+    git("commit", "-qm", "Fixture local file");
+    git("switch", "-q", "main");
+    await writeFile(join(root, "local.md"), "ignored worktree file\n");
+    await expect(gitCheckout(root, "protected")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(access(join(root, ".env"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(gitCheckout(root, "ignored")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await readFile(join(root, "local.md"), "utf8")).toBe("ignored worktree file\n");
+    expect((await gitStatus(root)).branch).toBe("main");
+  });
+
+  test("disables repository clean and smudge filters and checkout hooks", async () => {
+    await commitFiles({ ".gitattributes": "*.md filter=fixture\n", "note.md": "main\n" });
+    git("switch", "-q", "-c", "topic");
+    await commitFiles({ "note.md": "topic\n" });
+    git("switch", "-q", "main");
+    const hooks = join(root, ".git", "hooks");
+    await mkdir(hooks);
+    git("config", "--local", "core.hooksPath", hooks);
+    await writeFile(join(hooks, "post-checkout"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    git("config", "--local", "filter.fixture.clean", "uya-fixture-clean-does-not-exist");
+    git("config", "--local", "filter.fixture.smudge", "uya-fixture-smudge-does-not-exist");
+    git("config", "--local", "filter.fixture.required", "true");
+    await writeFile(join(root, "note.md"), "local\n");
+    await gitStage(root, { paths: ["note.md"] });
+    await gitUnstage(root, { all: true });
+    await gitDiscard(root, ["note.md"]);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("main\n");
+    expect((await gitCheckout(root, "topic")).branch).toBe("topic");
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("topic\n");
+  });
+});
+
+describe("git log", () => {
+  test("returns empty history for an unborn branch and parses commits with a bounded limit", async () => {
+    expect(await gitLog(root)).toEqual([]);
+    await commitFiles({ "note.md": "baseline\n" });
+    const firstHash = git("rev-parse", "HEAD").trim();
+    git("commit", "-qm", "Следующий\x1e коммит", "--allow-empty");
+    const latest = {
+      hash: git("rev-parse", "HEAD").trim(),
+      shortHash: git("rev-parse", "--short", "HEAD").trim(),
+      author: "Uya Fixture",
+      subject: "Следующий\x1e коммит",
+      date: git("log", "-1", "--format=%aI").trim(),
+    };
+    const log = await gitLog(root);
+    expect(log).toEqual([latest, expect.objectContaining({ hash: firstHash, subject: "Fixture baseline" })]);
+    expect(await gitLog(root, -10)).toEqual([latest]);
+    expect(await gitLog(root, 1000)).toEqual(log);
   });
 });

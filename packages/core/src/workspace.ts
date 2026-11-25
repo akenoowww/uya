@@ -8,10 +8,13 @@ import type {
   PromptSummary,
   PromptVariable,
   RenderedPrompt,
+  SearchOptions,
+  SearchResponse,
   TextContext,
   TextFile,
   WorkspaceInfo,
 } from "@ide/protocol";
+import { searchWorkspace } from "./search";
 import {
   canonicalDirectory,
   createEntry,
@@ -27,6 +30,7 @@ import {
   WorkspaceError,
   writeText,
 } from "./workspace-files";
+import { buildWorkspaceMap } from "./workspace-map";
 
 export { WorkspaceError } from "./workspace-files";
 
@@ -35,7 +39,7 @@ const MAX_FRONT_MATTER = 64 * 1024;
 const MAX_CONTEXT_BYTES = 256 * 1024;
 const MAX_SELECTION_BYTES = 128 * 1024;
 const MAX_PROJECT_RULE_BYTES = 64 * 1024;
-const PROJECT_RULE_PATHS = ["AGENTS.md", "CLAUDE.md", ".uya/rules.md", ".cursorrules", ".github/copilot-instructions.md"];
+const PROJECT_RULE_PATHS = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".uya/rules.md", ".cursorrules", ".github/copilot-instructions.md"];
 const VARIABLE_NAME = /^[A-Za-z_][\w-]*$/u;
 const PLACEHOLDER = /\{\{[ \t]*([A-Za-z_][\w-]*)[ \t]*\}\}/gu;
 
@@ -211,6 +215,14 @@ export class Workspace {
 
   async files({ query, limit }: { query?: string; limit?: number } = {}): Promise<string[]> {
     return listWorkspaceFiles(this.requireRoot(), query, limit);
+  }
+
+  async search(options: Omit<SearchOptions, "workspacePath">): Promise<SearchResponse> {
+    return searchWorkspace(this.requireRoot(), options);
+  }
+
+  async workspaceMap(activeFilePath?: string): Promise<TextContext | undefined> {
+    return buildWorkspaceMap(this.requireRoot(), activeFilePath);
   }
 
   async create({ path, kind, text }: { path: string; kind: "file" | "directory"; text?: string }): Promise<DirectoryEntry> {

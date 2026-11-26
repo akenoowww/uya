@@ -4,7 +4,7 @@ import {
   Stack, Text, TextInput, UnstyledButton,
 } from "@mantine/core";
 import {
-  BookOpen, Bug, CaretDown, ChartBar, Check, CheckCircle, ClockCounterClockwise, ColumnsPlusRight,
+  BookOpen, Brain, Bug, CaretDown, ChartBar, Check, CheckCircle, ClockCounterClockwise, ColumnsPlusRight,
   Files, FolderOpen, GitBranch, Keyboard, MagnifyingGlass, Play, PlugsConnected, Stop,
   TerminalWindow, XCircle,
 } from "@phosphor-icons/react";
@@ -14,6 +14,7 @@ import { useShallow } from "zustand/react/shallow";
 import { errorMessage } from "./bridge";
 import { JudgeModal } from "./components/JudgeModal";
 import { UyaBrandMark } from "./components/ProviderIcon";
+import { SynapseModal } from "./components/SynapseModal";
 import { HintTooltip } from "./components/Tooltip";
 import { GitPanel } from "./GitPanel";
 import { HistoryPanel } from "./HistoryPanel";
@@ -21,6 +22,7 @@ import { ProjectExplorer } from "./ProjectExplorer";
 import { SearchPanel } from "./SearchPanel";
 import { SettingsDialog } from "./SettingsDialog";
 import { formatShortcut, isMac } from "./shortcuts";
+import type { SynapseModalTab } from "./workbench";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
 import { formatDurationCompact, unavailable, workspaceLabel } from "./workbenchStore";
 
@@ -183,12 +185,15 @@ export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
   onOpenPalette: () => void;
   onRestartToUpdate?: () => void;
 }) {
-  const { dock, pickProject, openProviders } = useWorkbench();
-  const { workspace, recentWorkspaces, blocked, providerCount } = useWorkbenchState(useShallow((state) => ({
+  const { dock, pickProject, openProviders, openSynapse } = useWorkbench();
+  const { workspace, recentWorkspaces, blocked, providerCount, activeMissionCount } = useWorkbenchState(useShallow((state) => ({
     workspace: state.workspace,
     recentWorkspaces: state.recentWorkspaces,
     blocked: !state.bridge || state.choosingProject || state.submitting,
     providerCount: state.providers.filter((provider) => provider.available).length,
+    activeMissionCount: Object.values(state.missionsById).filter(
+      (mission) => mission.status === "running" || mission.status === "proposed",
+    ).length,
   })));
 
   const otherRecents = recentWorkspaces.filter((path) => path !== workspace?.path);
@@ -270,6 +275,17 @@ export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
             <ColumnsPlusRight size={15} weight="duotone" />
           </ActionIcon>
         </HintTooltip>
+        <HintTooltip label="Uya Synapse — Matrix, Capability Hub & Missions (/synapse)">
+          <Button
+            variant="default"
+            size="compact-xs"
+            leftSection={<Brain size={13} weight="duotone" color="var(--accent)" />}
+            rightSection={activeMissionCount > 0 ? <Badge size="xs" variant="light" color="iris" px={5}>{activeMissionCount}</Badge> : undefined}
+            onClick={() => openSynapse(activeMissionCount > 0 ? "missions" : "matrix")}
+          >
+            Synapse
+          </Button>
+        </HintTooltip>
         <HintTooltip label="Providers, rules & usage" shortcut={formatShortcut("open-providers")}>
           <Button
             variant="default"
@@ -287,7 +303,7 @@ export function WorkbenchTitlebar({ onOpenPalette, onRestartToUpdate }: {
 }
 
 export function ActivityRail() {
-  const { dock, toggleSidebar, openShortcuts, openUsage } = useWorkbench();
+  const { dock, toggleSidebar, openShortcuts, openUsage, openSynapse } = useWorkbench();
   const { sidebar, contextCount, gitChangeCount } = useWorkbenchState(useShallow((state) => ({
     sidebar: state.sidebar,
     contextCount: state.contextPaths.length + state.attachments.length,
@@ -374,6 +390,18 @@ export function ActivityRail() {
           onClick={() => dock.openTool("terminal", "Terminal")}
         >
           <TerminalWindow size={18} weight="regular" />
+        </ActionIcon>
+      </HintTooltip>
+      <HintTooltip label="Uya Synapse — Matrix & Capability Hub" side="right">
+        <ActionIcon
+          size="lg"
+          variant="subtle"
+          color="gray"
+          className="rail-action"
+          aria-label="Uya Synapse"
+          onClick={() => openSynapse("capabilities")}
+        >
+          <Brain size={18} weight="regular" />
         </ActionIcon>
       </HintTooltip>
       <HintTooltip label="Usage & Speed Insights" side="right">
@@ -623,14 +651,17 @@ export function WorkbenchStatus({ version }: { version?: string }) {
 }
 
 export function WorkbenchDialogs() {
-  const { core, settings, projectConfirm, judgeDialog, pickProject, setRules, runJudge } = useWorkbench();
+  const { core, settings, projectConfirm, judgeDialog, synapseDialog, pickProject, setRules, runJudge } = useWorkbench();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingRecent, setPendingRecent] = useState<string | undefined>(undefined);
   const [judgeOpen, setJudgeOpen] = useState(false);
-  const { providers, rules, rpc, lastBroadcastRunIds, details, activeArena } = useWorkbenchState(useShallow((state) => ({
+  const [synapseOpen, setSynapseOpen] = useState(false);
+  const [synapseTab, setSynapseTab] = useState<SynapseModalTab>("matrix");
+  const { providers, rules, rpc, workspacePath, lastBroadcastRunIds, details, activeArena } = useWorkbenchState(useShallow((state) => ({
     providers: state.providers,
     rules: state.rules,
     rpc: state.bridge?.rpc,
+    workspacePath: state.workspace?.path ?? null,
     lastBroadcastRunIds: state.lastBroadcastRunIds,
     details: state.details,
     activeArena: state.activeArena,
@@ -653,9 +684,25 @@ export function WorkbenchDialogs() {
     return () => { judgeDialog.current = null; };
   }, [judgeDialog]);
 
+  useEffect(() => {
+    synapseDialog.current = (tab?: SynapseModalTab) => {
+      if (tab) setSynapseTab(tab);
+      setSynapseOpen(true);
+    };
+    return () => { synapseDialog.current = null; };
+  }, [synapseDialog]);
+
   return (
     <>
       <SettingsDialog controls={settings} providers={providers} rules={rules} rpc={rpc} onRefresh={core.refreshProviders} onRules={setRules} />
+      <SynapseModal
+        opened={synapseOpen}
+        initialTab={synapseTab}
+        onClose={() => setSynapseOpen(false)}
+        workspacePath={workspacePath}
+        providers={providers}
+        rpc={rpc}
+      />
       <JudgeModal
         opened={judgeOpen}
         onClose={() => setJudgeOpen(false)}

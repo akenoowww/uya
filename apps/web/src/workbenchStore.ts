@@ -1,8 +1,8 @@
 import { createStore } from "zustand/vanilla";
 import type {
   ArenaSummary, CheckpointSummary, ConversationSummary, EditorSelection, EffortLevel, ExecutionMode,
-  ProjectRuleFile, Provider, RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail, RunSummary,
-  TextContext, VerifyPreset, VerifyRun, WorkspaceInfo,
+  MissionPlan, ProjectRuleFile, Provider, RenderedPrompt, RoutingMode, RoutingRule, RpcCall, RunDetail,
+  RunSummary, SplitPresence, TextContext, VerifyPreset, VerifyRun, WorkbenchSnapshot, WorkspaceInfo,
 } from "@ide/protocol";
 import type { Bridge } from "./bridge";
 import type { EditorDrafts } from "./editorDrafts";
@@ -14,6 +14,8 @@ export interface PaneConfig {
   effort?: EffortLevel;
   accessMode?: ExecutionMode;
   mode?: "structured" | "terminal";
+  alias?: string;
+  role?: string;
 }
 
 export interface ChatPane {
@@ -51,6 +53,8 @@ export interface WorkbenchState {
   activeVerify: VerifyRun | null;
   arenaEnabled: boolean;
   activeArena: ArenaSummary | null;
+  synapseEnabled: boolean;
+  missionsById: Record<string, MissionPlan>;
   pendingTerminalCommand: { command: string; nonce: number } | null;
   searchQuerySeed: { query: string; nonce: number } | null;
   editorDrafts: EditorDrafts;
@@ -102,6 +106,8 @@ export function createWorkbenchStore() {
     activeVerify: null,
     arenaEnabled: false,
     activeArena: null,
+    synapseEnabled: true,
+    missionsById: {},
     pendingTerminalCommand: null,
     searchQuerySeed: null,
     editorDrafts: new Map(),
@@ -185,11 +191,43 @@ export function formatDurationCompact(milliseconds: number): string {
   return milliseconds < 1000 ? `${Math.round(milliseconds)} ms` : `${(milliseconds / 1000).toFixed(1)} s`;
 }
 
+export function paneAlias(provider: Provider | undefined, config: PaneConfig, index: number): string {
+  const custom = config.alias?.trim();
+  if (custom) return custom;
+  return provider ? `${provider.id}-${index + 1}` : `split-${index + 1}`;
+}
+
 export function paneDisplayTitle(provider: Provider | undefined, config: PaneConfig, index: number): string {
   if (!provider) return `Split ${index + 1}`;
   const model = resolveModel(provider, config.model);
   if (config.mode === "terminal") return `${provider.name} (TUI)`;
   return model ? `${provider.name} · ${shortModelName(model)}` : provider.name;
+}
+
+export function buildWorkbenchSnapshot(state: WorkbenchState): WorkbenchSnapshot {
+  const hasWorkspace = Boolean(state.workspace);
+  const splits: SplitPresence[] = state.dock.chatPanes.flatMap((pane, index) => {
+    const provider = providerForPane(state.providers, pane.config, index);
+    if (!provider || pane.config.mode === "terminal") return [];
+    return [{
+      paneId: pane.id,
+      alias: paneAlias(provider, pane.config, index),
+      ...(pane.config.role ? { role: pane.config.role } : {}),
+      providerId: provider.id,
+      providerName: provider.name,
+      model: resolveModel(provider, pane.config.model),
+      effort: pane.config.effort,
+      accessMode: resolveAccessMode(provider, pane.config.accessMode, hasWorkspace),
+      busy: isPaneBusy(state, pane),
+    }];
+  });
+  return {
+    workspacePath: state.workspace?.path ?? null,
+    gitBranch: state.gitBranch,
+    activeFilePath: state.dock.filePath,
+    selectionPath: state.selection?.path,
+    splits,
+  };
 }
 
 export function activeChatPane(dock: DockSnapshot): ChatPane | undefined {

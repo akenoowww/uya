@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { RpcMethod, RpcParams, RpcResult, RunEvent } from "@ide/protocol";
+import { CapabilityHub } from "./capability-hub";
+import { CapabilityMatrixEngine } from "./capability-matrix";
 import { CheckpointManager } from "./checkpoints";
 import { CONVERSATION_HISTORY_LIMIT } from "./conversation";
 import type { CliModelDiscoverer } from "./cli-models";
@@ -10,8 +12,10 @@ import {
 } from "./git";
 import { History } from "./history";
 import type { LocalRuntimeId } from "./local-runtimes";
+import { MissionCoordinator } from "./missions";
 import { Providers } from "./providers";
 import { Runs } from "./runs";
+import { SynapseBroker } from "./synapse-broker";
 import { isRpcMethod, parseRpcParams, rpcEnvelope, rpcResponseId, RpcError, subscription } from "./validation";
 import { discoverVerifyPresets, VerifyManager } from "./verify";
 import { Workspace } from "./workspace";
@@ -39,6 +43,9 @@ function rpcHandlers(
   checkpoints: CheckpointManager,
   arenas: WorktreeArenaManager,
   verify: VerifyManager,
+  matrix: CapabilityMatrixEngine,
+  capabilities: CapabilityHub,
+  missions: MissionCoordinator,
 ): Handlers {
   function checkWorkspace(requested: string | null) {
     if (requested !== (workspace.path ?? null)) {
@@ -128,6 +135,10 @@ function rpcHandlers(
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.read(params);
     },
+    "workspace.readBinary": ({ workspacePath: requestedPath, path }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return workspace.readBinary({ path });
+    },
     "workspace.write": ({ workspacePath: requestedPath, ...params }) => {
       if (requestedPath !== undefined) checkWorkspace(requestedPath);
       return workspace.write(params);
@@ -189,6 +200,12 @@ function rpcHandlers(
         },
       });
       const completed = await verify.wait(started.id);
+      if (completed.status === "passed" || completed.status === "failed") {
+        history.recordModelOutcome(arena.workspacePath, slot.providerId, slot.model, {
+          verifyPassed: completed.status === "passed" ? 1 : 0,
+          verifyTotal: 1,
+        });
+      }
       return arenas.recordVerify(arenaId, slotId, {
         command,
         status: completed.status,
@@ -197,8 +214,15 @@ function rpcHandlers(
         output: completed.output,
       });
     },
-    "arena.apply": ({ arenaId, slotId, mode, branchName, cleanup }) =>
-      arenas.apply(arenaId, slotId, { mode, branchName, cleanup }),
+    "arena.apply": async ({ arenaId, slotId, mode, branchName, cleanup }) => {
+      const arena = await arenas.get(arenaId, false);
+      const winningSlot = arena.slots.find((item) => item.id === slotId);
+      const applied = await arenas.apply(arenaId, slotId, { mode, branchName, cleanup });
+      if (winningSlot) {
+        history.recordModelOutcome(arena.workspacePath, winningSlot.providerId, winningSlot.model, { arenaWins: 1 });
+      }
+      return applied;
+    },
     "arena.discard": async ({ arenaId }) => {
       await arenas.discard(arenaId);
       return null;
@@ -224,6 +248,12 @@ function rpcHandlers(
             durationMs: finished.finishedAt ? finished.finishedAt - finished.startedAt : undefined,
             output: finished.output,
           });
+          if (finished.status === "passed" || finished.status === "failed") {
+            history.recordModelOutcome(root, slot.providerId, slot.model, {
+              verifyPassed: finished.status === "passed" ? 1 : 0,
+              verifyTotal: 1,
+            });
+          }
         };
       }
       return verify.start({ workspacePath: root, cwd, command, onFinish });
@@ -237,6 +267,52 @@ function rpcHandlers(
     "prompts.read": (params) => workspace.readPrompt(params),
     "prompts.write": (params) => workspace.writePrompt(params),
     "prompts.render": (params) => workspace.renderPrompt(params),
+    "synapse.matrix": async ({ workspacePath: requestedPath }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return matrix.snapshot(await providers.list(), workspace.path ?? null);
+    },
+    "synapse.syncArena": async () => matrix.sync(await providers.list(), workspace.path ?? null),
+    "synapse.setOverride": async ({ domain, providerId, model, workspacePath: requestedPath }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      const override = providerId ? { domain, providerId, ...(model ? { model } : {}) } : null;
+      return matrix.setOverride(await providers.list(), domain, override, workspace.path ?? null);
+    },
+    "synapse.recommend": async ({ domain, workspacePath: requestedPath, preferWarmProviderId }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return matrix.recommend(await providers.list(), domain, {
+        workspacePath: workspace.path ?? null,
+        preferWarmProviderId,
+      });
+    },
+    "capabilities.list": ({ workspacePath: requestedPath }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return capabilities.list(workspace.path ?? null);
+    },
+    "capabilities.save": ({ pack }) => capabilities.save(pack),
+    "capabilities.remove": async ({ id }) => {
+      await capabilities.remove(id);
+      return null;
+    },
+    "capabilities.setSecret": ({ key, value }) => capabilities.setSecret(key, value),
+    "capabilities.invoke": ({ id, args, workspacePath: requestedPath }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      const root = workspace.path ?? null;
+      return capabilities.invoke(id, args, {
+        workspacePath: root,
+        writeWorkspaceBinary: root && workspace.path === root
+          ? (path, data) => workspace.writeBinary(path, data)
+          : undefined,
+        bypassApproval: true,
+      });
+    },
+    "missions.list": ({ workspacePath: requestedPath, limit }) => {
+      if (requestedPath !== undefined) checkWorkspace(requestedPath);
+      return missions.list(requestedPath === undefined ? workspace.path ?? null : requestedPath, limit);
+    },
+    "missions.get": ({ id }) => missions.get(id),
+    "missions.approve": ({ id, autonomous, stepOverrides }) =>
+      missions.approve(id, { autonomous, stepOverrides }),
+    "missions.cancel": ({ id }) => missions.cancel(id),
   };
 }
 
@@ -307,6 +383,9 @@ export function startServer(options: ServerOptions) {
     createCheckpoint: (workspacePath, label) => checkpoints.create(workspacePath, { label }),
   });
   const verify = new VerifyManager();
+  const matrix = new CapabilityMatrixEngine(history);
+  const capabilities = new CapabilityHub(options.dataDir, history);
+  const synapseBroker = new SynapseBroker();
   void arenas.cleanupOrphans().catch(() => undefined);
 
   const listeners = new Map<string, Set<Socket>>();
@@ -328,7 +407,71 @@ export function startServer(options: ServerOptions) {
   }
 
   const runs = new Runs(history, providers, workspace, publish, checkpoints, arenas);
-  const handlers = rpcHandlers(history, providers, runs, workspace, checkpoints, arenas, verify);
+  const missions = new MissionCoordinator(history, {
+    recommendSpecialist: async (domain, workspacePath) =>
+      matrix.recommend(await providers.list(), domain, { workspacePath }),
+    executeAgentStep: async ({ mission, step, prompt, signal }) => {
+      const accessMode = step.accessMode ?? (mission.workspacePath ? "agent" : "isolated");
+      const { run, text } = await runs.startAndWait({
+        workspacePath: mission.workspacePath,
+        providerId: step.providerId,
+        model: step.model,
+        effort: step.effort,
+        accessMode,
+        mode: "manual",
+        synapseEnabled: true,
+        createCheckpoint: Boolean(mission.workspacePath && accessMode === "agent"),
+        originActor: {
+          alias: mission.title,
+          providerId: step.providerId ?? "uya",
+          kind: "mission",
+        },
+        prompt,
+      }, signal, { depth: 0, skipWorkspaceLock: true });
+      const status = run.status === "succeeded" ? "succeeded" : run.status === "cancelled" ? "cancelled" : "failed";
+      const summary = text.trim().slice(0, 800) || run.error || `Step finished (${run.status}).`;
+      return { runId: run.id, status, summary };
+    },
+    executeCapabilityStep: ({ capabilityId, args, workspacePath, signal }) =>
+      capabilities.invoke(capabilityId, args, {
+        workspacePath,
+        writeWorkspaceBinary: workspacePath && workspace.path === workspacePath
+          ? (path, data) => workspace.writeBinary(path, data)
+          : undefined,
+        bypassApproval: true,
+        signal,
+      }),
+    executeVerifyStep: async ({ command, workspacePath, signal }) => {
+      const started = await verify.start({ workspacePath, cwd: workspacePath, command });
+      const onAbort = () => {
+        try {
+          verify.cancel(started.id);
+        } catch {
+          // Already finished.
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await verify.wait(started.id);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    },
+  });
+
+  let serverPort: number | undefined;
+  runs.attachSynapse({
+    mcpUrl: () => (serverPort ? `http://127.0.0.1:${serverPort}/mcp` : undefined),
+    broker: synapseBroker,
+    matrix,
+    capabilities,
+    missions,
+    verify,
+  });
+
+  const handlers = rpcHandlers(
+    history, providers, runs, workspace, checkpoints, arenas, verify, matrix, capabilities, missions,
+  );
   let stopping = false;
   try {
     const server = Bun.serve<SocketData>({
@@ -341,6 +484,7 @@ export function startServer(options: ServerOptions) {
         if (origin && !allowedOrigins.has(origin)) return new Response(null, { status: 403 });
         const path = new URL(request.url).pathname;
         if (stopping) return new Response(null, { status: 503 });
+        if (path === "/mcp") return synapseBroker.handleHttp(request);
         const headers = new Headers({ "Cache-Control": "no-store", "Vary": "Origin" });
         if (origin) headers.set("Access-Control-Allow-Origin", origin);
         if (path === "/stream" && request.method === "GET") {
@@ -410,11 +554,13 @@ export function startServer(options: ServerOptions) {
         },
       },
     });
+    serverPort = server.port!;
     return {
       port: server.port!,
       async close() {
         if (stopping) return;
         stopping = true;
+        await missions.shutdown();
         await runs.shutdown();
         await verify.shutdown();
         await providers.shutdown();

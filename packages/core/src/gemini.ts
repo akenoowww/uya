@@ -2,7 +2,8 @@ import type { EffortLevel, ExecutionMode } from "@ide/protocol";
 import { lstatSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeEffortLevel, type AdapterRequest } from "./provider-adapter";
+import { mcpServersForMode } from "./claude";
+import { normalizeEffortLevel, type AdapterRequest, type McpStdioServerSpec } from "./provider-adapter";
 
 export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -88,12 +89,15 @@ const geminiTools: Record<ExecutionMode, string[]> = {
   agent: [...geminiReadTools, "replace", "write_file"],
 };
 
-function geminiToolPolicy(tools: readonly string[]): string {
+function geminiToolPolicy(tools: readonly string[], mcpNames: readonly string[]): string {
   // Gemini CLI accepts priorities from 0 through 999.
   const allow = tools.length
     ? `[[rule]]\ntoolName = ${JSON.stringify(tools)}\ndecision = "allow"\npriority = 999\n\n`
     : "";
-  return `${allow}[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = ${tools.length ? 998 : 999}\n`;
+  const allowMcp = mcpNames.map((name) =>
+    `[[rule]]\nmcpName = ${JSON.stringify(name)}\ntoolName = "*"\ndecision = "allow"\npriority = 999\n\n`,
+  ).join("");
+  return `${allow}${allowMcp}[[rule]]\ntoolName = "*"\ndecision = "deny"\npriority = ${tools.length ? 998 : 999}\n`;
 }
 
 export async function geminiCliInvocation(
@@ -101,14 +105,26 @@ export async function geminiCliInvocation(
   protocol: "stream-json" | "acp" = "stream-json",
   effort?: EffortLevel,
   accessMode: ExecutionMode = "isolated",
+  mcpServers?: readonly McpStdioServerSpec[],
 ) {
   const settingsPath = join(scratchDir, "settings.json");
   const policyPath = join(scratchDir, "uya-read-only.toml");
   const disabledName = `uya-disabled-${crypto.randomUUID()}`;
   const tools = geminiTools[accessMode];
+  const activeMcpServers = mcpServersForMode(accessMode, mcpServers);
+  const mcpNames = activeMcpServers.map(({ name }) => name);
+  const allowedMcpNames = mcpNames.join(",") || disabledName;
+  const allowedMcpArgs = allowedMcpNames.startsWith("-")
+    ? [`--allowed-mcp-server-names=${allowedMcpNames}`]
+    : ["--allowed-mcp-server-names", allowedMcpNames];
   const settings = {
     hooksConfig: { enabled: false },
     mcp: { serverCommand: "" },
+    ...(activeMcpServers.length ? {
+      mcpServers: Object.fromEntries(activeMcpServers.map(({ name, command, args, env }) => [
+        name, { command, args, trust: true, ...(env ? { env } : {}) },
+      ])),
+    } : {}),
     context: { fileName: `${disabledName}.md`, includeDirectoryTree: false, loadMemoryFromIncludeDirectories: false },
     tools: { core: tools.length ? tools : [disabledName], allowed: [], discoveryCommand: "", callCommand: "" },
     skills: { enabled: false },
@@ -120,12 +136,12 @@ export async function geminiCliInvocation(
   };
   await Promise.all([
     writeFile(settingsPath, JSON.stringify(settings), { mode: 0o600 }),
-    writeFile(policyPath, geminiToolPolicy(tools), { mode: 0o600 }),
+    writeFile(policyPath, geminiToolPolicy(tools, mcpNames), { mode: 0o600 }),
   ]);
   return {
     settingsPath,
     args: [
-      "--extensions", "none", "--allowed-mcp-server-names", disabledName,
+      "--extensions", "none", ...allowedMcpArgs,
       "--policy", policyPath, "--approval-mode", "default",
       ...(protocol === "acp" ? ["--acp"] : ["--output-format", "stream-json"]),
     ],

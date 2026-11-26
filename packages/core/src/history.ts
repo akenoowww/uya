@@ -636,9 +636,9 @@ export class History {
       ? this.db.query<{
           workspace: string; provider_id: string; model: string;
           verify_passed: number; verify_total: number; arena_wins: number; updated_at: number;
-        }, [string, string]>(
+        }, [string]>(
           "SELECT * FROM model_outcomes WHERE workspace = ? OR workspace = '' ORDER BY updated_at DESC",
-        ).all(workspace, "")
+        ).all(workspace)
       : this.db.query<{
           workspace: string; provider_id: string; model: string;
           verify_passed: number; verify_total: number; arena_wins: number; updated_at: number;

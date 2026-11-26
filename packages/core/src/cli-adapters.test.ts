@@ -2,15 +2,22 @@ import type { ExecutionMode, ToolMeta } from "@ide/protocol";
 import { expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runCli, type CliPrepare } from "./agents";
 import { prepareClaude, prepareCodex, prepareGeminiApi, prepareGeminiCli, prepareOpenCode } from "./cli-adapters";
 import { geminiCliInvocation } from "./gemini";
-import type { AdapterOutput, AdapterRequest, Usage } from "./provider-adapter";
+import type { AdapterOutput, AdapterRequest, McpStdioServerSpec, Usage } from "./provider-adapter";
 
 const workspacePath = join(tmpdir(), "uya fixture workspace");
 const worktreePath = join(tmpdir(), "uya fixture worktree");
 const providerSessionId = "fixture_session-123";
+const fixtureMcpServers = [
+  {
+    name: "uya", command: join(tmpdir(), "uya's fixture server"),
+    args: ["--stdio", String.raw`C:\fixture dir\bridge.json`, 'value with "quotes"'], env: { UYA_FIXTURE: "enabled" },
+  },
+  { name: "fixture-2", command: "fixture-server", args: [] },
+] satisfies readonly McpStdioServerSpec[];
 
 function cliFixture(id: string, options: Partial<AdapterRequest> = {}) {
   const events: { type: Parameters<AdapterOutput["emit"]>[0]; text: string; meta?: ToolMeta }[] = [];
@@ -160,6 +167,25 @@ test("Codex ignores session IDs that can be parsed as flags or paths", async () 
   }
 });
 
+test.each(["read-only", "agent", "isolated"] as const)("Codex MCP overrides respect %s mode", async (accessMode) => {
+  const { request, usage } = cliFixture("codex", { accessMode, workspacePath, mcpServers: fixtureMcpServers });
+  for (const sessionId of [undefined, providerSessionId]) {
+    const invocation = await prepareCodex({ ...request, providerSessionId: sessionId }, "", usage);
+    const overrides = invocation.args.flatMap((arg, index, args) =>
+      arg === "-c" && args[index + 1]?.startsWith("mcp_servers.") ? [args[index + 1]] : [],
+    );
+    if (accessMode === "isolated") {
+      expect(overrides).toEqual([]);
+    } else {
+      expect(overrides).toHaveLength(4);
+      expect(Bun.TOML.parse(overrides.join("\n"))).toEqual({
+        mcp_servers: Object.fromEntries(fixtureMcpServers.map(({ name, command, args }) => [name, { command, args }])),
+      });
+      expect(invocation.args.indexOf(overrides[0])).toBeLessThan(invocation.args.indexOf("exec"));
+    }
+  }
+});
+
 const claudeModes = [
   ["isolated", "", undefined],
   ["read-only", "Read,Glob,Grep,LS", "plan"],
@@ -186,6 +212,29 @@ test.each(claudeModes)("Claude applies %s tools and settings without writing int
     expect(invocation.args.includes("--no-session-persistence")).toBe(isolated);
     expect(argValue(invocation.args, "--resume")).toBe(isolated ? undefined : providerSessionId);
     expect(invocation.useSingleTurnPrompt).toBe(!isolated);
+  });
+});
+
+test.each(claudeModes)("Claude MCP config respects %s mode", async (accessMode, tools) => {
+  await withFixture(async (scratch) => {
+    const { request, usage } = cliFixture("claude", { accessMode, workspacePath, mcpServers: fixtureMcpServers });
+    const invocation = await prepareClaude(request, scratch, usage);
+    const configPath = argValue(invocation.args, "--mcp-config");
+    if (!configPath) throw new Error("Expected a Claude MCP config.");
+    const config = await readFile(resolve(scratch, configPath), "utf8");
+    expect(invocation.args).toContain("--strict-mcp-config");
+    expect(argValue(invocation.args, "--tools")).toBe(tools);
+    if (accessMode === "isolated") {
+      expect(config).toBe('{"mcpServers":{}}');
+      expect(argValue(invocation.args, "--disallowedTools")).toBe("mcp__*");
+      expect(invocation.args).not.toContain("--allowedTools");
+    } else {
+      expect(JSON.parse(config)).toEqual({
+        mcpServers: Object.fromEntries(fixtureMcpServers.map(({ name, ...spec }) => [name, spec])),
+      });
+      expect(argValue(invocation.args, "--allowedTools")).toBe("mcp__uya__*,mcp__fixture-2__*");
+      expect(invocation.args).not.toContain("--disallowedTools");
+    }
   });
 });
 
@@ -241,6 +290,43 @@ test.each(geminiModes)("Gemini CLI generates the %s tool policy", async (accessM
   });
 });
 
+test.each(geminiModes)("Gemini CLI MCP settings and policy respect %s mode", async (accessMode, allowedTools) => {
+  await withFixture(async (scratch) => {
+    const { request, usage } = cliFixture("gemini", { accessMode, workspacePath, mcpServers: fixtureMcpServers });
+    const invocation = await prepareGeminiCli(request, scratch, usage);
+    const settings: unknown = JSON.parse(await readFile(join(scratch, "settings.json"), "utf8"));
+    const policy = Bun.TOML.parse(await readFile(join(scratch, "uya-read-only.toml"), "utf8"));
+    const allowedNames = argValue(invocation.args, "--allowed-mcp-server-names");
+    if (accessMode === "isolated") {
+      expect(settings).not.toHaveProperty("mcpServers");
+      expect(allowedNames).toStartWith("uya-disabled-");
+      expect(policy).toEqual({ rule: [{ toolName: "*", decision: "deny", priority: 999 }] });
+    } else {
+      expect(settings).toMatchObject({
+        mcpServers: Object.fromEntries(fixtureMcpServers.map(({ name, ...spec }) => [name, { ...spec, trust: true }])),
+        tools: { core: allowedTools },
+      });
+      expect(allowedNames).toBe("uya,fixture-2");
+      expect(policy).toEqual({ rule: [
+        { toolName: allowedTools, decision: "allow", priority: 999 },
+        { mcpName: "uya", toolName: "*", decision: "allow", priority: 999 },
+        { mcpName: "fixture-2", toolName: "*", decision: "allow", priority: 999 },
+        { toolName: "*", decision: "deny", priority: 998 },
+      ] });
+    }
+  });
+});
+
+test("Gemini CLI treats a leading hyphen in a valid MCP name as part of the flag value", async () => {
+  await withFixture(async (scratch) => {
+    const { args } = await geminiCliInvocation(scratch, "stream-json", undefined, "agent", [
+      { name: "--fixture", command: "fixture-server", args: [] },
+    ]);
+    expect(args).toContain("--allowed-mcp-server-names=--fixture");
+    expect(args).not.toContain("--fixture");
+  });
+});
+
 test("Gemini CLI and API report normalized cache tokens, including zero", async () => {
   await withFixture(async (scratch) => {
     for (const [field, value] of [["cached_content_token_count", 8], ["cached_tokens", 6], ["cached", 0], ["total_cached_tokens", 12]] as const) {
@@ -280,6 +366,39 @@ test.each(openCodeModes)("OpenCode sets the ordered %s permission rules", async 
   expect(invocation.env?.OPENCODE_PERMISSION).toBe(JSON.stringify(permission));
   expect(JSON.parse(invocation.env?.OPENCODE_CONFIG_CONTENT ?? "{}")).toMatchObject({
     permission, agent: { [agent]: { mode: "primary", permission } },
+  });
+});
+
+test.each(openCodeModes)("OpenCode MCP config respects %s mode", async (accessMode, basePermission) => {
+  const { request, usage } = cliFixture("opencode", { accessMode, workspacePath, mcpServers: fixtureMcpServers });
+  const invocation = await prepareOpenCode(request, "/fixture/scratch", usage);
+  const config: unknown = JSON.parse(invocation.env?.OPENCODE_CONFIG_CONTENT ?? "{}");
+  const agent = argValue(invocation.args, "--agent");
+  if (!agent) throw new Error("Expected an OpenCode agent.");
+  const permission = accessMode === "isolated" ? basePermission : { ...basePermission, "uya_*": "allow", "fixture-2_*": "allow" };
+  expect(invocation.env?.OPENCODE_PERMISSION).toBe(JSON.stringify(permission));
+  expect(config).toMatchObject({ permission, agent: { [agent]: { permission } } });
+  if (accessMode === "isolated") {
+    expect(config).not.toHaveProperty("mcp");
+  } else {
+    expect(config).toMatchObject({ mcp: Object.fromEntries(fixtureMcpServers.map(({ name, command, args, env }) => [
+      name, { type: "local", command: [command, ...args], enabled: true, ...(env ? { environment: env } : {}) },
+    ])) });
+  }
+});
+
+test.each([
+  ["codex", prepareCodex], ["claude", prepareClaude], ["gemini", prepareGeminiCli], ["opencode", prepareOpenCode],
+] as const)("%s validates MCP names only when MCP is enabled", async (provider, prepare) => {
+  await withFixture(async (scratch) => {
+    for (const name of ["", "uya.*", "../uya", "uya,other", "uya\n", "x".repeat(65)]) {
+      const { request, usage } = cliFixture(provider, {
+        accessMode: "agent", workspacePath, mcpServers: [{ ...fixtureMcpServers[0], name }],
+      });
+      await expect(Promise.resolve().then(() => prepare(request, scratch, usage))).rejects.toThrow("Invalid MCP server name.");
+      await prepare({ ...request, accessMode: "isolated" }, scratch, usage);
+      await prepare({ ...request, workspacePath: undefined }, scratch, usage);
+    }
   });
 });
 

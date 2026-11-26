@@ -1,13 +1,18 @@
 import type { ApprovalDecision, ApprovalOption, EffortLevel, ToolKind, ToolMeta, ToolStatus } from "@ide/protocol";
 import { spawn } from "node:child_process";
+import { chmodSync, copyFileSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { version as clientVersion } from "../package.json";
 import { cliEnv, spawnTarget } from "./agents";
+import { mcpServersForMode } from "./claude";
 import { classifyCliDiagnostic, drainCliDiagnostics } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { promptForCli } from "./conversation";
 import {
-  AdapterError, normalizeEffortLevel, normalizeExecutionMode, type AdapterApprovalPrompt, type AdapterRequest, type Usage,
+  AdapterError, normalizeEffortLevel, normalizeExecutionMode,
+  type AdapterApprovalPrompt, type AdapterRequest, type McpStdioServerSpec, type Usage,
 } from "./provider-adapter";
 import { AcpSessionPool, type AcpOptionMeta, type AcpSession } from "./session-pool";
 
@@ -26,6 +31,19 @@ export interface AcpRunOptions {
 const MAX_ACP_LINE_BYTES = 2_000_000;
 const MAX_TOOL_OUTPUT_BYTES = 4 * 1024;
 const cancelledPermission = { outcome: { outcome: "cancelled" } };
+
+function isBridgeConfigPath(arg: string): boolean {
+  return basename(arg) === "uya-mcp-bridge.json";
+}
+
+function mcpSessionKey(servers: readonly McpStdioServerSpec[]): string | undefined {
+  if (!servers.length) return;
+  return JSON.stringify(servers.map(({ name, command, args, env = {} }) => ({
+    name, command,
+    args: args.map((arg) => (isBridgeConfigPath(arg) ? null : arg)),
+    env: Object.keys(env).sort().map((key) => [key, env[key]]),
+  })));
+}
 
 function asObject(value: unknown): JsonObject | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -305,10 +323,12 @@ class AcpConnection {
   private nextId = 1;
   private pending?: PendingRpc;
   private failure?: { reason: unknown };
+  private mcpScratchDir?: string;
 
   constructor(
     private readonly session: AcpSession,
     args: readonly string[],
+    readonly mcpKey: string | undefined,
     private readonly onFailure: () => void,
   ) {
     const { child, closed } = session;
@@ -321,6 +341,33 @@ class AcpConnection {
       this.fail(new AcpConnectionClosed());
     });
     void closed.then(() => this.fail(new AcpConnectionClosed()));
+  }
+
+  stageMcpServers(servers: readonly McpStdioServerSpec[]): readonly McpStdioServerSpec[] {
+    if (this.session.key === undefined) return servers;
+    return servers.map((server, serverIndex) => ({
+      ...server,
+      args: server.args.map((arg, argIndex) => {
+        if (!isBridgeConfigPath(arg)) return arg;
+        try {
+          const dir = this.mcpScratchDir ??= this.createMcpScratchDir();
+          const configPath = join(dir, `uya-mcp-bridge-${server.name}-${serverIndex}-${argIndex}.json`);
+          const nextPath = `${configPath}.next`;
+          copyFileSync(resolve(this.session.cwd, arg), nextPath);
+          chmodSync(nextPath, 0o600);
+          renameSync(nextPath, configPath);
+          return configPath;
+        } catch {
+          throw new AdapterError("Could not stage the ACP MCP bridge configuration.");
+        }
+      }),
+    }));
+  }
+
+  private createMcpScratchDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "uya-acp-mcp-"));
+    void this.session.closed.then(() => rmSync(dir, { force: true, recursive: true, maxRetries: 2 })).catch(() => undefined);
+    return dir;
   }
 
   request(method: string, params: JsonObject): Promise<AcpReply> {
@@ -453,6 +500,7 @@ class AcpTurn {
     private readonly session: AcpSession,
     private readonly connection: AcpConnection,
     private readonly request: AdapterRequest,
+    private readonly hasUyaMcp: boolean,
   ) {}
 
   update(line: string, update: JsonObject): void {
@@ -483,13 +531,18 @@ class AcpTurn {
     const tool = this.rememberTool(asObject(params?.toolCall) ?? {});
     const options = approvalOptions(params);
     const once = options.find((option) => option.kind === "allow_once")?.id;
+    const sessionOption = options.find((option) => option.kind === "allow_session")?.id;
+    const toolName = tool.name?.trim() ?? tool.title ?? tool.kind;
+    if (this.hasUyaMcp && (toolName.startsWith("uya_") || toolName.startsWith("mcp__uya__"))) {
+      // The Uya bridge authorizes each tool call using the current run's policy.
+      this.reply(id, params, once ?? sessionOption);
+      return;
+    }
     if (isReadTool(tool.kind)) {
       this.reply(id, params, once);
       return;
     }
-    const toolName = tool.name ?? tool.title ?? tool.kind;
     const grantKey = JSON.stringify([tool.kind, normalizeToolName(toolName)]);
-    const sessionOption = options.find((option) => option.kind === "allow_session")?.id;
     if (this.session.accessMode === "read-only") this.reply(id, params);
     else if (this.session.sessionAllowTools.has(grantKey)) this.reply(id, params, once ?? sessionOption);
     else if (this.request.requestApproval) this.requestInteractivePermission(id, params, tool, options, grantKey);
@@ -547,13 +600,20 @@ class AcpTurn {
   }
 }
 
-async function initializeSession(session: AcpSession, connection: AcpConnection): Promise<string> {
+async function initializeSession(
+  session: AcpSession, connection: AcpConnection, servers: readonly McpStdioServerSpec[],
+): Promise<string> {
   await connection.request("initialize", {
     protocolVersion: 1,
     clientCapabilities: {},
     clientInfo: { name: "uya", version: clientVersion },
   });
-  const { result } = await connection.request("session/new", { cwd: session.cwd, mcpServers: [] });
+  const { result } = await connection.request("session/new", {
+    cwd: session.cwd,
+    mcpServers: servers.map(({ name, command, args, env }) => ({
+      name, command, args, env: Object.entries(env ?? {}).map(([name, value]) => ({ name, value })),
+    })),
+  });
   const sessionId = firstText(result?.sessionId);
   if (!sessionId) throw new AcpRpcError("ACP session missing sessionId.");
   session.sessionId = sessionId;
@@ -610,10 +670,15 @@ function readUsage(session: AcpSession, result: JsonObject | undefined): Usage {
 }
 
 async function promptSession(
-  session: AcpSession, connection: AcpConnection, request: AdapterRequest, encode?: AcpRunOptions["encode"],
+  session: AcpSession,
+  connection: AcpConnection,
+  request: AdapterRequest,
+  activeMcpServers: readonly McpStdioServerSpec[],
+  encode?: AcpRunOptions["encode"],
 ): Promise<Usage> {
   const priorSessionId = session.sessionId;
-  const sessionId = priorSessionId ?? await initializeSession(session, connection);
+  const servers = connection.stageMcpServers(activeMcpServers);
+  const sessionId = priorSessionId ?? await initializeSession(session, connection, servers);
   await configureModel(session, connection, sessionId, request.model);
   await configureEffort(session, connection, sessionId, normalizeEffortLevel(request.effort));
   request.signal.throwIfAborted();
@@ -629,9 +694,14 @@ async function promptSession(
 }
 
 async function runTurn(
-  session: AcpSession, connection: AcpConnection, request: AdapterRequest, options: AcpRunOptions, pool: AcpSessionPool,
+  session: AcpSession,
+  connection: AcpConnection,
+  request: AdapterRequest,
+  activeMcpServers: readonly McpStdioServerSpec[],
+  options: AcpRunOptions,
+  pool: AcpSessionPool,
 ): Promise<Usage> {
-  const turn = new AcpTurn(session, connection, request);
+  const turn = new AcpTurn(session, connection, request, activeMcpServers.some(({ name }) => name === "uya"));
   const onAbort = () => {
     turn.cancelApprovals();
     connection.cancelPrompt();
@@ -641,7 +711,7 @@ async function runTurn(
   request.signal.addEventListener("abort", onAbort, { once: true });
   try {
     request.signal.throwIfAborted();
-    return await promptSession(session, connection, request, options.encode);
+    return await promptSession(session, connection, request, activeMcpServers, options.encode);
   } finally {
     connection.turn = undefined;
     request.signal.removeEventListener("abort", onAbort);
@@ -683,27 +753,36 @@ export async function runAcpCli(request: AdapterRequest, options: AcpRunOptions)
   if (model && !isSafeCliModelName(model)) throw new AdapterError("Invalid model name.");
   signal.throwIfAborted();
 
+  const cwd = request.workingDirectory ?? request.workspacePath;
+  const accessMode = cwd ? normalizeExecutionMode(request.accessMode) ?? "isolated" : "isolated";
+  const activeMcpServers = mcpServersForMode(accessMode, request.mcpServers);
+  const mcpKey = cwd && request.conversationKey !== undefined ? mcpSessionKey(activeMcpServers) : undefined;
   const pool = options.pool ?? sharedPool;
-  const session = pool.acquire({
-    providerId: provider.id,
-    conversationKey: request.conversationKey,
-    cwd: request.workingDirectory ?? request.workspacePath,
-    accessMode: normalizeExecutionMode(request.accessMode) ?? "isolated",
-  }, (cwd) => {
+  const scope = { providerId: provider.id, conversationKey: request.conversationKey, cwd, accessMode };
+  const spawnChild = (sessionCwd: string) => {
     const target = spawnTarget(executable, options.args);
     return spawn(target.command, target.args, {
-      cwd, env: cliEnv(options.env), detached: process.platform !== "win32",
+      cwd: sessionCwd, env: cliEnv(options.env), detached: process.platform !== "win32",
       shell: target.shell, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
-  });
+  };
+  let session = pool.acquire(scope, spawnChild);
+  let connection = connections.get(session);
+  // An ACP session's MCP servers are fixed by session/new.
+  while (connection && connection.mcpKey !== mcpKey) {
+    await pool.invalidate(session);
+    signal.throwIfAborted();
+    session = pool.acquire(scope, spawnChild);
+    connection = connections.get(session);
+  }
 
   try {
-    let connection = connections.get(session);
     if (!connection) {
-      connection = new AcpConnection(session, options.args, () => void pool.invalidate(session));
+      const currentSession = session;
+      connection = new AcpConnection(session, options.args, mcpKey, () => void pool.invalidate(currentSession));
       connections.set(session, connection);
     }
-    const usage = await runTurn(session, connection, request, options, pool);
+    const usage = await runTurn(session, connection, request, activeMcpServers, options, pool);
     signal.throwIfAborted();
     await pool.release(session);
     if (session.key === undefined) signal.throwIfAborted();

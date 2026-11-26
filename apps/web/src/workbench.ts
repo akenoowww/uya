@@ -1,5 +1,5 @@
 import type {
-  ConversationSummary, EditorSelection, EffortLevel, RenderedPrompt, RoutingRule, RunInput,
+  ConversationSummary, EditorSelection, EffortLevel, OriginActor, RenderedPrompt, RoutingRule, RunInput,
 } from "@ide/protocol";
 import type { SettingsControls } from "./SettingsDialog";
 import { errorMessage } from "./bridge";
@@ -14,10 +14,12 @@ import { hasPendingEditorSaves, hasUnsavedEditorDrafts } from "./editorDrafts";
 import { parseSlashInvocation } from "./slashCommands";
 import { readLatestTerminalOutput } from "./terminalBuffer";
 import {
-  activeChatPane, conversationKey, createWorkbenchStore, hasBusyDestination,
-  isPaneBusy, providerForPane, resolveAccessMode, resolveModel, routingTargets, utf8Bytes,
+  activeChatPane, buildWorkbenchSnapshot, conversationKey, createWorkbenchStore, hasBusyDestination,
+  isPaneBusy, paneAlias, providerForPane, resolveAccessMode, resolveModel, routingTargets, utf8Bytes,
 } from "./workbenchStore";
 import type { ChatPane, SidebarView } from "./workbenchStore";
+
+export type SynapseModalTab = "matrix" | "capabilities" | "missions";
 
 export function createWorkbench() {
   const store = createWorkbenchStore();
@@ -26,6 +28,30 @@ export function createWorkbench() {
   const settings: { current: SettingsControls | null } = { current: null };
   const projectConfirm: { current: ((pendingRecentPath?: string) => void) | null } = { current: null };
   const judgeDialog: { current: (() => void) | null } = { current: null };
+  const synapseDialog: { current: ((tab?: SynapseModalTab) => void) | null } = { current: null };
+
+  core.setUiCommandHandler((command) => {
+    switch (command.action) {
+      case "open_file":
+        if (command.path) dock.openFile(command.path, command.line);
+        break;
+      case "open_diff":
+        if (command.path) dock.openDiff({ mode: "git", path: command.path, staged: false });
+        break;
+      case "focus_split": {
+        if (!command.paneId) break;
+        const state = store.getState();
+        const found = state.dock.chatPanes.find((pane, index) => {
+          const provider = providerForPane(state.providers, pane.config, index);
+          return pane.id === command.paneId
+            || paneAlias(provider, pane.config, index) === command.paneId
+            || provider?.id === command.paneId;
+        });
+        if (found) dock.activate(found.id);
+        break;
+      }
+    }
+  });
 
   function pushPromptHistory(paneId: string, prompt: string) {
     store.setState((state) => {
@@ -437,6 +463,16 @@ export function createWorkbench() {
       case "judge":
         judgeDialog.current?.();
         return true;
+      case "synapse":
+      case "matrix":
+        synapseDialog.current?.("matrix");
+        return true;
+      case "capabilities":
+        synapseDialog.current?.("capabilities");
+        return true;
+      case "mission":
+        synapseDialog.current?.("missions");
+        return true;
       case "git":
         store.setState((current) => ({ sidebar: current.sidebar === "git" ? null : "git" }));
         return true;
@@ -635,9 +671,12 @@ export function createWorkbench() {
     }
   }
 
-  async function sendToPane(paneId: string, promptOverride?: string) {
+  async function sendToPane(paneId: string, promptOverride?: string, originActor?: OriginActor) {
     const state = store.getState();
-    const { bridge, choosingProject, contextPaths, attachments, selection, template, includeProjectRules, projectRules } = state;
+    const {
+      bridge, choosingProject, contextPaths, attachments, selection, template,
+      includeProjectRules, projectRules, synapseEnabled,
+    } = state;
     const rawDraft = promptOverride ?? state.paneDrafts[paneId] ?? "";
     const prompt = rawDraft.trim();
     if (!prompt) return;
@@ -673,6 +712,9 @@ export function createWorkbench() {
         model,
         effort,
         accessMode,
+        synapseEnabled,
+        workbenchSnapshot: buildWorkbenchSnapshot(state),
+        ...(originActor ? { originActor } : {}),
         includeWorkspaceMap: root && state.includeWorkspaceMap ? true : undefined,
         activeFilePath: root ? state.dock.filePath : undefined,
         createCheckpoint: root && accessMode === "agent" ? true : undefined,
@@ -772,6 +814,8 @@ export function createWorkbench() {
           model,
           effort,
           accessMode,
+          synapseEnabled: state.synapseEnabled,
+          workbenchSnapshot: buildWorkbenchSnapshot(state),
           includeWorkspaceMap: root && includeWorkspaceMap ? true : undefined,
           activeFilePath: root ? state.dock.filePath : undefined,
           createCheckpoint: !activeArenaId && root && accessMode === "agent" ? true : undefined,
@@ -883,10 +927,41 @@ export function createWorkbench() {
     await sendToPane(newPaneId, judgePrompt);
   }
 
+  async function forwardReplyToSplit(
+    targetPaneId: string | "new",
+    sourceAlias: string,
+    sourceProviderId: string,
+    replyText: string,
+  ) {
+    const trimmed = replyText.trim();
+    if (!trimmed) return;
+    let destinationId = targetPaneId;
+    if (targetPaneId === "new") {
+      const state = store.getState();
+      const alternate = state.providers.find((entry) => entry.available && entry.structured && entry.id !== sourceProviderId)
+        ?? state.providers.find((entry) => entry.available && entry.structured);
+      const created = dock.newSplit(alternate ? { providerId: alternate.id, mode: "structured" } : undefined);
+      if (!created) return;
+      destinationId = created;
+    } else {
+      dock.activate(destinationId);
+    }
+    const forwardedPrompt = [
+      `Review or build upon this output from @${sourceAlias}:`,
+      "---",
+      trimmed.slice(0, 64_000),
+    ].join("\n\n");
+    await sendToPane(destinationId, forwardedPrompt, {
+      alias: sourceAlias,
+      providerId: sourceProviderId,
+      kind: "forward",
+    });
+  }
+
   return {
-    store, core, dock, settings, projectConfirm, judgeDialog,
+    store, core, dock, settings, projectConfirm, judgeDialog, synapseDialog,
     pickProject, openHistory, resumeConversation, forkConversationToSplit,
-    applyPrompt, sendPrompt, sendToPane, runJudge, setPaneDraft, executeSlashCommand,
+    applyPrompt, sendPrompt, sendToPane, forwardReplyToSplit, runJudge, setPaneDraft, executeSlashCommand,
     startNewConversation, openSearch, runInTerminal, sendVerifyFailureToAgent, generateCommitMessage,
     activeRunIdForPane, activeChatPane: getActiveChatPane,
     toggleContext, attachFile, attachGitDiff, attachTerminal, removeAttachment,
@@ -896,6 +971,7 @@ export function createWorkbench() {
     openRules: () => settings.current?.showRules(),
     openShortcuts: () => settings.current?.showShortcuts(),
     openUsage: () => settings.current?.showUsage(),
+    openSynapse: (tab?: SynapseModalTab) => synapseDialog.current?.(tab),
     setRules: (rules: RoutingRule[]) => store.setState({ rules }),
     retryConnection: () => store.setState((state) => ({ connectionAttempt: state.connectionAttempt + 1 })),
     toggleBroadcast: () => store.setState((state) => {

@@ -13,7 +13,7 @@ import { TerminalPanel } from "./TerminalPanel";
 import type { PaneParams } from "./dockLayout";
 import { useWorkbench, useWorkbenchState } from "./workbenchContext";
 import {
-  conversationKey, isPaneBusy, paneDisplayTitle, providerForPane, unavailable,
+  conversationKey, isPaneBusy, paneAlias, paneDisplayTitle, providerForPane, unavailable,
 } from "./workbenchStore";
 import type { PaneConfig } from "./workbenchStore";
 import "dockview-react/dist/styles/dockview.css";
@@ -104,10 +104,14 @@ function TerminalTool() {
 }
 
 function HistoryTool({ id }: { id: string | undefined }) {
-  const { dock, openExternalUrl, previewDiffFromCode, forkConversationToSplit, runInTerminal } = useWorkbench();
+  const {
+    core, dock, attachFile, openExternalUrl, previewDiffFromCode, forkConversationToSplit, runInTerminal,
+  } = useWorkbench();
   const detail = useWorkbenchState((state) => id ? state.details[id] : undefined);
   const providers = useWorkbenchState((state) => state.providers);
   const root = useWorkbenchState((state) => state.workspace?.path ?? null);
+  const rpc = useWorkbenchState((state) => state.bridge?.rpc);
+  const missionsById = useWorkbenchState((state) => state.missionsById);
   const conversationWorkspace = useWorkbenchState((state) => {
     const convId = id ? state.details[id]?.run.conversationId : undefined;
     if (!convId) return undefined;
@@ -136,11 +140,17 @@ function HistoryTool({ id }: { id: string | undefined }) {
         <Transcript
           detail={detail}
           providers={providers}
+          cwd={root}
+          rpc={rpc}
+          missionsById={missionsById}
           onFork={canFork ? (runId) => void forkConversationToSplit(detail.run.conversationId!, root, { upToRunId: runId }) : undefined}
           onOpenUrl={(url) => void openExternalUrl(url)}
           onOpenFile={(path, line) => dock.openFile(path, line)}
+          onAttachFile={attachFile}
           onPreviewDiff={previewDiffFromCode}
           onRunCommand={runInTerminal}
+          onApproveMission={core.approveMission}
+          onCancelMission={core.cancelMission}
         />
       </div>
     </div>
@@ -149,18 +159,28 @@ function HistoryTool({ id }: { id: string | undefined }) {
 
 function ChatTool({ id }: { id: string }) {
   const {
-    core, dock, pickProject, openProviders, sendToPane, setPaneDraft, startNewConversation,
+    core, dock, pickProject, openProviders, sendToPane, forwardReplyToSplit, setPaneDraft, startNewConversation,
     attachFile, attachGitDiff, attachTerminal, forkConversationToSplit,
     openExternalUrl, previewDiffFromCode, runInTerminal,
   } = useWorkbench();
   const {
     bridge, root, recentWorkspaces, index, config, provider, providers, draft, promptHistory, busy,
-    choosingProject, contextCount, hasSelection,
+    choosingProject, contextCount, hasSelection, missionsById, peerSplits,
   } = useWorkbenchState(useShallow((state) => {
     const panes = state.dock.chatPanes;
     const paneIndex = panes.findIndex((pane) => pane.id === id);
     const pane = panes[paneIndex];
     const paneConfig = pane?.config ?? emptyConfig;
+    const peers = panes.flatMap((other, otherIndex) => {
+      if (other.id === id || other.config.mode === "terminal") return [];
+      const otherProvider = providerForPane(state.providers, other.config, otherIndex);
+      if (!otherProvider?.structured) return [];
+      return [{
+        id: other.id,
+        title: paneDisplayTitle(otherProvider, other.config, otherIndex),
+        providerId: otherProvider.id,
+      }];
+    });
     return {
       bridge: state.bridge,
       root: state.workspace?.path ?? null,
@@ -175,6 +195,8 @@ function ChatTool({ id }: { id: string }) {
       choosingProject: state.choosingProject,
       contextCount: state.contextPaths.length + state.attachments.length,
       hasSelection: Boolean(state.selection),
+      missionsById: state.missionsById,
+      peerSplits: peers,
     };
   }));
 
@@ -185,6 +207,7 @@ function ChatTool({ id }: { id: string }) {
     })));
 
   const title = paneDisplayTitle(provider, config, Math.max(0, index));
+  const sourceAlias = paneAlias(provider, config, Math.max(0, index));
   useEffect(() => {
     dock.setTitle(id, title);
   }, [dock, id, title]);
@@ -206,6 +229,9 @@ function ChatTool({ id }: { id: string }) {
       bridge={bridge}
       rpc={bridge?.rpc}
       cwd={root}
+      sourceAlias={sourceAlias}
+      peerSplits={peerSplits}
+      missionsById={missionsById}
       recentWorkspaces={recentWorkspaces}
       onPickProject={(recentPath) => void pickProject(false, recentPath)}
       onDraftChange={(value) => setPaneDraft(id, value)}
@@ -214,6 +240,11 @@ function ChatTool({ id }: { id: string }) {
       onCancel={core.cancelRun}
       onRespondApproval={core.respondApproval}
       onRestoreCheckpoint={core.restoreCheckpoint}
+      onApproveMission={core.approveMission}
+      onCancelMission={core.cancelMission}
+      onForwardReply={(targetPaneId, alias, sourceProviderId, replyText) => {
+        void forwardReplyToSplit(targetPaneId, alias, sourceProviderId, replyText);
+      }}
       onNewConversation={() => startNewConversation(id)}
       onOpenProviders={openProviders}
       onRefreshProviders={core.refreshProviders}

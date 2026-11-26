@@ -3,6 +3,62 @@ export type ExecutionMode = "isolated" | "read-only" | "agent";
 export type ToolKind = "read" | "search" | "edit" | "write" | "shell" | "fetch" | "other";
 export type ToolStatus = "running" | "done" | "error";
 export type ApprovalDecision = "allow_once" | "allow_session" | "reject";
+export type CapabilityDomain = "code" | "webdev" | "text" | "vision" | "search" | "audio" | "image" | "video";
+export type CapabilityOutputKind = "text" | "json" | "audio" | "image" | "video" | "file";
+
+export interface OriginActor {
+  alias: string;
+  providerId: string;
+  kind: "consult" | "handoff" | "red_team" | "mission" | "forward";
+}
+
+export interface SplitPresence {
+  paneId: string;
+  alias: string;
+  role?: string;
+  providerId: string;
+  providerName: string;
+  model?: string;
+  effort?: EffortLevel;
+  accessMode: ExecutionMode;
+  busy: boolean;
+}
+
+export interface WorkbenchSnapshot {
+  workspacePath: string | null;
+  gitBranch: string | null;
+  activeFilePath?: string;
+  selectionPath?: string;
+  splits: SplitPresence[];
+}
+
+export interface ArtifactItem {
+  id: string;
+  kind: CapabilityOutputKind;
+  label: string;
+  path: string;
+  mimeType?: string;
+  bytes?: number;
+  sourceId?: string;
+  createdAt: number;
+}
+
+export interface SynapseCallInfo {
+  id: string;
+  kind: "consult" | "red_team" | "capability" | "verify" | "handoff";
+  target: string;
+  domain?: CapabilityDomain;
+  status: "running" | "done" | "error";
+  summary?: string;
+  childRunId?: string;
+}
+
+export interface UiCommand {
+  action: "open_file" | "open_diff" | "focus_split";
+  path?: string;
+  line?: number;
+  paneId?: string;
+}
 
 export interface ToolMeta {
   id?: string;
@@ -52,6 +108,7 @@ export interface Provider {
   modelEfforts?: Record<string, EffortLevel[]>;
   supportedModes?: ExecutionMode[];
   supportsPersistentSession?: boolean;
+  supportsMcp?: boolean;
   detail?: string;
 }
 
@@ -88,6 +145,9 @@ export interface RunInput {
   arenaId?: string;
   arenaSlotId?: string;
   createCheckpoint?: boolean;
+  synapseEnabled?: boolean;
+  workbenchSnapshot?: WorkbenchSnapshot;
+  originActor?: OriginActor;
   broadcastGroupId?: string;
   includeProjectRules?: boolean;
   prompt: string;
@@ -126,6 +186,7 @@ export interface RunSummary {
   arenaId?: string;
   arenaSlotId?: string;
   providerSessionId?: string;
+  originActor?: OriginActor;
   promptVersion?: string;
 }
 
@@ -134,6 +195,10 @@ export type RunEvent = { runId: string; seq: number } & (
   | { type: "tool"; text: string; meta?: ToolMeta }
   | { type: "approval_request"; request: ApprovalRequest }
   | { type: "approval_resolved"; requestId: string; decision: ApprovalDecision }
+  | { type: "artifact"; artifact: ArtifactItem }
+  | { type: "synapse_call"; call: SynapseCallInfo }
+  | { type: "mission_proposed"; mission: MissionPlan }
+  | { type: "ui_command"; command: UiCommand }
   | { type: "status"; run: RunSummary }
 );
 
@@ -410,6 +475,158 @@ export interface UsageStats {
   byProvider: ProviderUsageStats[];
 }
 
+export interface BinaryFile {
+  path: string;
+  mimeType: string;
+  base64: string;
+  bytes: number;
+}
+
+export interface ArenaBenchmarkEntry {
+  modelSlug: string;
+  displayName: string;
+  organization?: string;
+  domain: CapabilityDomain;
+  elo: number;
+  rank: number;
+  updatedAt: number;
+}
+
+export interface DomainPreferenceOverride {
+  providerId: string;
+  model?: string;
+  effort?: EffortLevel;
+}
+
+export interface ModelCapabilityScore {
+  providerId: string;
+  providerName: string;
+  model: string;
+  domainScores: Partial<Record<CapabilityDomain, { elo: number; rank?: number }>>;
+  localRuns: number;
+  localVerifyPassed: number;
+  localVerifyTotal: number;
+  localArenaWins: number;
+  avgTtftMs?: number;
+  cacheHitRate?: number;
+  compositeScore: number;
+  recommendedEffort: EffortLevel;
+}
+
+export interface SpecialistRecommendation {
+  domain: CapabilityDomain;
+  providerId: string;
+  providerName: string;
+  model?: string;
+  effort: EffortLevel;
+  elo?: number;
+  localWinRate?: number;
+  reason: string;
+}
+
+export interface CapabilityMatrixSnapshot {
+  syncedAt: number | null;
+  source: string;
+  entriesCount: number;
+  models: ModelCapabilityScore[];
+  recommendations: Partial<Record<CapabilityDomain, SpecialistRecommendation>>;
+  overrides: Partial<Record<CapabilityDomain, DomainPreferenceOverride>>;
+}
+
+export interface CapabilityInputField {
+  name: string;
+  type: "string" | "number" | "boolean";
+  description: string;
+  required?: boolean;
+  default?: string | number | boolean;
+  enum?: string[];
+}
+
+export interface CapabilityPollSpec {
+  urlTemplate: string;
+  statusPath: string;
+  doneValues: string[];
+  failedValues: string[];
+  resultUrlPath: string;
+  intervalMs?: number;
+  timeoutMs?: number;
+}
+
+export interface CapabilityRestSpec {
+  method: "GET" | "POST";
+  url: string;
+  headers?: Record<string, string>;
+  bodyTemplate?: string;
+  inputSchema: CapabilityInputField[];
+  outputKind: CapabilityOutputKind;
+  outputPathTemplate?: string;
+  responsePath?: string;
+  poll?: CapabilityPollSpec;
+}
+
+export interface CapabilityMcpSpec {
+  command?: string;
+  args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+export interface CapabilityPack {
+  id: string;
+  name: string;
+  description: string;
+  domain: CapabilityDomain;
+  kind: "rest" | "mcp-stdio" | "mcp-http";
+  enabled: boolean;
+  builtin?: boolean;
+  scope?: "builtin" | "global" | "project";
+  requiresApproval: boolean;
+  secretKeys: string[];
+  configuredSecrets?: string[];
+  rest?: CapabilityRestSpec;
+  mcp?: CapabilityMcpSpec;
+}
+
+export interface CapabilityInvokeResult {
+  text: string;
+  artifact?: ArtifactItem;
+}
+
+export interface MissionStep {
+  id: string;
+  title: string;
+  domain: CapabilityDomain;
+  kind: "agent" | "capability" | "verify";
+  providerId?: string;
+  providerName?: string;
+  model?: string;
+  effort?: EffortLevel;
+  accessMode?: ExecutionMode;
+  capabilityId?: string;
+  capabilityArgs?: Record<string, unknown>;
+  contract: string;
+  verifyCommand?: string;
+  status: "proposed" | "running" | "succeeded" | "failed" | "skipped";
+  runId?: string;
+  summary?: string;
+  artifact?: ArtifactItem;
+}
+
+export interface MissionPlan {
+  id: string;
+  workspacePath: string | null;
+  title: string;
+  objective: string;
+  createdByRunId?: string;
+  status: "proposed" | "running" | "completed" | "cancelled" | "failed";
+  autonomous: boolean;
+  maxHops: number;
+  hopsUsed: number;
+  steps: MissionStep[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 type Empty = Record<string, never>;
 
 export interface RpcMethods {
@@ -437,6 +654,7 @@ export interface RpcMethods {
   "workspace.files": [{ query?: string; limit?: number; workspacePath?: string }, string[]];
   "workspace.search": [SearchOptions, SearchResponse];
   "workspace.read": [{ path: string; workspacePath?: string }, TextFile];
+  "workspace.readBinary": [{ path: string; workspacePath?: string }, BinaryFile];
   "workspace.write": [{ path: string; text: string; revision: string; workspacePath?: string }, TextFile];
   "workspace.create": [{ path: string; kind: "file" | "directory"; text?: string; workspacePath?: string }, DirectoryEntry];
   "workspace.rename": [{ from: string; to: string; workspacePath?: string }, DirectoryEntry];
@@ -469,6 +687,19 @@ export interface RpcMethods {
   "prompts.read": [{ ref: PromptRef }, PromptDocument];
   "prompts.write": [{ ref: PromptRef; source: string; revision?: string }, PromptDocument];
   "prompts.render": [{ ref: PromptRef; values: Record<string, string> }, RenderedPrompt];
+  "synapse.matrix": [{ workspacePath?: string | null }, CapabilityMatrixSnapshot];
+  "synapse.syncArena": [Empty, CapabilityMatrixSnapshot];
+  "synapse.setOverride": [{ domain: CapabilityDomain; providerId: string | null; model?: string; effort?: EffortLevel; workspacePath?: string | null }, CapabilityMatrixSnapshot];
+  "synapse.recommend": [{ domain: CapabilityDomain; workspacePath?: string | null; preferWarmProviderId?: string }, SpecialistRecommendation | null];
+  "capabilities.list": [{ workspacePath?: string | null }, CapabilityPack[]];
+  "capabilities.save": [{ pack: CapabilityPack }, CapabilityPack];
+  "capabilities.remove": [{ id: string }, null];
+  "capabilities.setSecret": [{ key: string; value: string | null }, { configuredKeys: string[] }];
+  "capabilities.invoke": [{ id: string; args: Record<string, unknown>; workspacePath?: string | null; runId?: string }, CapabilityInvokeResult];
+  "missions.list": [{ workspacePath?: string | null; limit?: number }, MissionPlan[]];
+  "missions.get": [{ id: string }, MissionPlan];
+  "missions.approve": [{ id: string; autonomous?: boolean; stepOverrides?: Array<{ stepId: string; providerId?: string; model?: string; effort?: EffortLevel }> }, MissionPlan];
+  "missions.cancel": [{ id: string }, MissionPlan];
 }
 
 export type RpcMethod = keyof RpcMethods;

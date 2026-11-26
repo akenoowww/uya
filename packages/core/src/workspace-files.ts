@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdir, open, opendir, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative as relativeTo, resolve, sep } from "node:path";
-import type { DirectoryEntry, TextFile } from "@ide/protocol";
+import type { BinaryFile, DirectoryEntry, TextFile } from "@ide/protocol";
 
 type WorkspaceErrorCode = "INVALID_INPUT" | "NO_WORKSPACE" | "NOT_FOUND" | "FORBIDDEN" | "CONFLICT" | "LIMIT" |
   "INVALID_PROMPT" | "IO";
@@ -15,6 +15,7 @@ export class WorkspaceError extends Error {
 }
 
 export const MAX_TEXT_BYTES = 1024 * 1024;
+export const MAX_BINARY_BYTES = 24 * 1024 * 1024;
 const MAX_ENTRIES = 5000;
 const MAX_INDEX_DEPTH = 12;
 const MAX_INDEX_ENTRIES = 50_000;
@@ -288,6 +289,97 @@ export async function readText(root: string, relative: string, maxBytes = MAX_TE
   } finally {
     await handle.close();
   }
+}
+
+const BINARY_MIME_TYPES: Readonly<Record<string, string>> = {
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".m4a": "audio/mp4",
+  ".flac": "audio/flac",
+  ".aac": "audio/aac",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".pdf": "application/pdf",
+};
+
+export function inferBinaryMimeType(filePath: string): string {
+  return BINARY_MIME_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+}
+
+export async function readBinary(root: string, relative: string, maxBytes = MAX_BINARY_BYTES): Promise<BinaryFile> {
+  const normalized = relativePath(relative).join("/");
+  const { path, stats } = await walk(root, relativePath(relative), "file");
+  requireRegularFile(stats);
+  if (stats.size > maxBytes) throw new WorkspaceError("LIMIT", "Binary asset exceeds the 24 MiB preview limit.");
+  const openFlags = (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  const handle = await fs(() => open(path, openFlags));
+  try {
+    const before = await fs(() => handle.stat());
+    requireRegularFile(before);
+    if (before.size > maxBytes) throw new WorkspaceError("LIMIT", "Binary asset exceeds the 24 MiB preview limit.");
+    if (!stats || !sameVersion(stats, before)) throw new WorkspaceError("CONFLICT", "The file changed. Open it again.");
+    const data = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < data.length) {
+      const { bytesRead } = await fs(() => handle.read(data, offset, data.length - offset, offset));
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset !== before.size || !sameVersion(before, await fs(() => handle.stat()))) {
+      throw new WorkspaceError("CONFLICT", "The file changed. Open it again.");
+    }
+    return {
+      path: normalized,
+      mimeType: inferBinaryMimeType(normalized),
+      base64: data.toString("base64"),
+      bytes: before.size,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+export function writeBinaryFile(root: string, relative: string, data: Uint8Array): Promise<{ path: string; bytes: number }> {
+  return mutate(async () => {
+    if (data.byteLength > MAX_BINARY_BYTES) {
+      throw new WorkspaceError("LIMIT", "Generated binary asset exceeds the 24 MiB limit.");
+    }
+    const parts = relativePath(relative);
+    for (let i = 1; i < parts.length; i++) {
+      const dirStep = await walk(root, parts.slice(0, i), "directory", true);
+      if (!dirStep.stats) {
+        await fs(() => mkdir(dirStep.path, { mode: 0o755 }));
+      } else if (!dirStep.stats.isDirectory()) {
+        throw new WorkspaceError("CONFLICT", "A file already exists along the output folder path.");
+      }
+    }
+    const { path, stats } = await walk(root, parts, "file", true);
+    if (stats && !isSingleLinkFile(stats)) {
+      throw new WorkspaceError("FORBIDDEN", "Refusing to overwrite a non-regular or linked file.");
+    }
+    const temporary = join(dirname(path), `.ide-bin-${randomUUID()}`);
+    const handle = await fs(() => open(temporary, "wx", stats ? stats.mode & 0o777 : 0o644));
+    try {
+      try {
+        await fs(() => handle.writeFile(data));
+        await fs(() => handle.sync());
+      } finally {
+        await handle.close();
+      }
+      await walk(root, parts.slice(0, -1), "directory");
+      await fs(() => rename(temporary, path));
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
+    return { path: parts.join("/"), bytes: data.byteLength };
+  });
 }
 
 export function validateText(text: string) {

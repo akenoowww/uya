@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
 import type {
+  BinaryFile,
   DirectoryEntry,
   ProjectRuleFile,
   PromptDocument,
@@ -22,12 +23,14 @@ import {
   listWorkspaceFiles,
   MAX_TEXT_BYTES,
   promptDirectory,
+  readBinary,
   readText,
   relativePath,
   removeEntry,
   renameEntry,
   validateText,
   WorkspaceError,
+  writeBinaryFile,
   writeText,
 } from "./workspace-files";
 import { buildWorkspaceMap } from "./workspace-map";
@@ -239,6 +242,14 @@ export class Workspace {
 
   async read({ path }: { path: string }): Promise<TextFile> {
     return readText(this.requireRoot(), path);
+  }
+
+  async readBinary({ path }: { path: string }): Promise<BinaryFile> {
+    return readBinary(this.requireRoot(), path);
+  }
+
+  async writeBinary(path: string, data: Uint8Array): Promise<{ path: string; bytes: number }> {
+    return writeBinaryFile(this.requireRoot(), path, data);
   }
 
   async write({ path, text, revision }: { path: string; text: string; revision: string }): Promise<TextFile> {

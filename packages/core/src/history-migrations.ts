@@ -94,6 +94,49 @@ const migrations = [
     SELECT id, workspace, run_id, created_at, restored_at, label, files_count, metadata FROM checkpoints LIMIT 0;
     SELECT id, workspace, created_at, status, value FROM arenas LIMIT 0;
   `,
+  `
+    CREATE TABLE IF NOT EXISTS arena_ratings (
+      model_slug TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      organization TEXT,
+      elo REAL NOT NULL,
+      rank INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (model_slug, domain)
+    );
+    CREATE INDEX IF NOT EXISTS arena_ratings_domain_idx
+      ON arena_ratings (domain, rank ASC);
+    CREATE TABLE IF NOT EXISTS model_outcomes (
+      workspace TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      verify_passed INTEGER NOT NULL DEFAULT 0,
+      verify_total INTEGER NOT NULL DEFAULT 0,
+      arena_wins INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace, provider_id, model)
+    );
+    CREATE TABLE IF NOT EXISTS missions (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      value TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS missions_workspace_idx
+      ON missions (workspace, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS capabilities (
+      id TEXT PRIMARY KEY,
+      updated_at INTEGER NOT NULL,
+      value TEXT NOT NULL
+    );
+    SELECT model_slug, domain, display_name, organization, elo, rank, updated_at FROM arena_ratings LIMIT 0;
+    SELECT workspace, provider_id, model, verify_passed, verify_total, arena_wins, updated_at FROM model_outcomes LIMIT 0;
+    SELECT id, workspace, created_at, updated_at, status, value FROM missions LIMIT 0;
+    SELECT id, updated_at, value FROM capabilities LIMIT 0;
+  `,
 ] as const;
 
 const errorMessages = {

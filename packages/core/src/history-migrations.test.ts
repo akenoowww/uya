@@ -105,7 +105,7 @@ test("upgrades v0.1 history, preserves rows and settings, and reopens the same h
       expect(reopened.get(interruptedRun.id)?.events.length).toBe(1);
       expect(reopened.get(legacyRun.id)?.events).toEqual([legacyEvent]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(4);
+      expect(readVersion(db)).toBe(5);
       expect(db.query("SELECT line FROM raw_events").get()).toEqual({ line: "synthetic raw frame" });
     } finally {
       reopened.close();
@@ -131,7 +131,7 @@ test("adopts an unversioned preview that already contains scoped conversation ro
         { run: legacyRun, events: [legacyEvent] },
       ]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(4);
+      expect(readVersion(db)).toBe(5);
     } finally {
       history.close();
     }
@@ -167,7 +167,7 @@ test("upgrades v0.2.1 history and backfills searchable prompts and ordered text 
       expect(history.list(10, { query: "unsearchable" })).toEqual([]);
       expect(history.conversations(10, { query: "backfill" }).map(({ id }) => id)).toEqual(["legacy-thread"]);
       using db = new Database(filepath, { readonly: true });
-      expect(readVersion(db)).toBe(4);
+      expect(readVersion(db)).toBe(5);
       expect(db.query("SELECT run_id, prompt, response FROM run_search ORDER BY run_id").all()).toEqual([
         { run_id: interruptedRun.id, prompt: interruptedRun.prompt, response: "" },
         { run_id: legacyRun.id, prompt: legacyRun.prompt, response: "Synthetic legacy response backfill" },
@@ -206,5 +206,22 @@ test("rolls back schema changes and the version when a later migration fails", (
     using db = new Database(filepath);
     expect(readVersion(db)).toBe(0);
     expect(db.query("SELECT name FROM sqlite_schema WHERE type = 'table'").all()).toEqual([{ name: "conversation_runs" }]);
+  });
+});
+
+test("scopes model outcomes to the requested workspace plus global entries", () => {
+  withFixture((dir) => {
+    const history = new History(dir);
+    try {
+      history.recordModelOutcome("/ws/alpha", "codex", "gpt-5.4", { verifyPassed: 3, verifyTotal: 4, arenaWins: 1 });
+      history.recordModelOutcome("/ws/beta", "claude", "claude-opus-4-6", { verifyPassed: 2, verifyTotal: 2 });
+      history.recordModelOutcome(null, "gemini", "gemini-2.5-pro", { arenaWins: 2 });
+
+      const alpha = history.listModelOutcomes("/ws/alpha");
+      expect(alpha.map((row) => row.providerId).sort()).toEqual(["codex", "gemini"]);
+      expect(history.listModelOutcomes().length).toBe(3);
+    } finally {
+      history.close();
+    }
   });
 });

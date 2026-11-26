@@ -43,6 +43,14 @@ const broadcastGroupId = text("Broadcast group ID", 100)
 const effortLevel = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"], { error: "Unknown effort level." });
 const executionMode = z.enum(["isolated", "read-only", "agent"], { error: "Unknown execution mode." });
 const approvalDecision = z.enum(["allow_once", "allow_session", "reject"], { error: "Unknown approval decision." });
+const capabilityDomain = z.enum(
+  ["code", "webdev", "text", "vision", "search", "audio", "image", "video"],
+  { error: "Unknown capability domain." },
+);
+const capabilityOutputKind = z.enum(
+  ["text", "json", "audio", "image", "video", "file"],
+  { error: "Unknown capability output kind." },
+);
 const modelName = text("Model", 256).refine((value) => !value.startsWith("-") && !/[\x00-\x1f\x7f]/.test(value), {
   error: "Invalid model name.",
 });
@@ -73,6 +81,32 @@ const customProvider = z.object({
   structuredArgs: boundedArray(text("Structured argument", 4096, true), 50, "Set up to 50 structured arguments.").optional(),
 });
 
+const originActor = z.object({
+  alias: text("Actor alias", 64),
+  providerId,
+  kind: z.enum(["consult", "handoff", "red_team", "mission", "forward"], { error: "Unknown actor kind." }),
+}, { error: "Origin actor must be an object." });
+
+const splitPresence = z.object({
+  paneId: text("Pane ID", 100),
+  alias: text("Split alias", 64),
+  role: text("Split role", 64).optional(),
+  providerId,
+  providerName: text("Provider name", 100),
+  model: modelName.optional(),
+  effort: effortLevel.optional(),
+  accessMode: executionMode,
+  busy: z.boolean({ error: "Busy must be a boolean." }),
+}, { error: "Each split presence must be an object." });
+
+const workbenchSnapshot = z.object({
+  workspacePath: projectPath.nullable(),
+  gitBranch: text("Git branch", 256).nullable(),
+  activeFilePath: filePath.optional(),
+  selectionPath: filePath.optional(),
+  splits: boundedArray(splitPresence, 24, "Include up to 24 splits."),
+}, { error: "Workbench snapshot must be an object." });
+
 const runInput = z.object({
   conversationId: conversationId.optional(),
   broadcastGroupId: broadcastGroupId.optional(),
@@ -86,6 +120,9 @@ const runInput = z.object({
   arenaId: entityId("Arena ID").optional(),
   arenaSlotId: entityId("Arena slot ID").optional(),
   createCheckpoint: z.boolean({ error: "Create checkpoint must be a boolean." }).optional(),
+  synapseEnabled: z.boolean({ error: "Synapse enabled must be a boolean." }).optional(),
+  workbenchSnapshot: workbenchSnapshot.optional(),
+  originActor: originActor.optional(),
   prompt: text("Prompt", 256_000),
   contextPaths: boundedArray(filePath, 20, "Select up to 20 context files.").optional(),
   attachments: attachments.optional(),
@@ -143,6 +180,91 @@ const searchOptions = z.object({
   workspacePath: projectPath.optional(),
 });
 
+const stringMap = (maxEntries: number, valueMax: number, error: string) =>
+  z.custom<Record<string, unknown>>((value) => {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      && Object.keys(value).length <= maxEntries;
+  }, { error })
+    .transform((value) => Object.entries(value))
+    .pipe(z.array(z.tuple([text("Header or key", 128), text("Value", valueMax, true)])))
+    .transform((entries) => Object.fromEntries(entries));
+
+const capabilityInputField = z.object({
+  name: text("Field name", 64).regex(/^[A-Za-z_][A-Za-z0-9_]*$/, { error: "Invalid field name." }),
+  type: z.enum(["string", "number", "boolean"], { error: "Invalid field type." }),
+  description: text("Field description", 512),
+  required: z.boolean({ error: "Required must be a boolean." }).optional(),
+  default: z.union([text("Default text", 1024, true), z.number(), z.boolean()], { error: "Invalid default value." }).optional(),
+  enum: boundedArray(text("Enum option", 128), 32, "Provide up to 32 enum options.").optional(),
+}, { error: "Each input field must be an object." });
+
+const capabilityPollSpec = z.object({
+  urlTemplate: text("Poll URL", 2048),
+  statusPath: text("Status path", 256),
+  doneValues: boundedArray(text("Done status", 64), 16, "Provide up to 16 done statuses."),
+  failedValues: boundedArray(text("Failed status", 64), 16, "Provide up to 16 failed statuses."),
+  resultUrlPath: text("Result URL path", 256),
+  intervalMs: integer("Poll interval", 250, 30_000).optional(),
+  timeoutMs: integer("Poll timeout", 1_000, 300_000).optional(),
+}, { error: "Poll specification must be an object." });
+
+const capabilityRestSpec = z.object({
+  method: z.enum(["GET", "POST"], { error: "Choose GET or POST." }),
+  url: text("Capability URL", 2048),
+  headers: stringMap(32, 4096, "Provide up to 32 headers.").optional(),
+  bodyTemplate: text("Body template", 65_536, true).optional(),
+  inputSchema: boundedArray(capabilityInputField, 32, "Provide up to 32 input fields."),
+  outputKind: capabilityOutputKind,
+  outputPathTemplate: filePath.optional(),
+  responsePath: text("Response path", 256).optional(),
+  poll: capabilityPollSpec.optional(),
+}, { error: "REST specification must be an object." });
+
+const capabilityMcpSpec = z.object({
+  command: text("MCP command", 4096).optional(),
+  args: boundedArray(text("MCP argument", 4096, true), 50, "Provide up to 50 MCP arguments.").optional(),
+  url: text("MCP URL", 2048).optional(),
+  headers: stringMap(32, 4096, "Provide up to 32 headers.").optional(),
+}, { error: "MCP specification must be an object." });
+
+const capabilityPackSchema = z.object({
+  id: entityId("Capability ID"),
+  name: text("Capability name", 100),
+  description: text("Capability description", 1024),
+  domain: capabilityDomain,
+  kind: z.enum(["rest", "mcp-stdio", "mcp-http"], { error: "Unknown capability kind." }),
+  enabled: z.boolean({ error: "Enabled must be a boolean." }),
+  builtin: z.boolean({ error: "Builtin must be a boolean." }).optional(),
+  scope: z.enum(["builtin", "global", "project"], { error: "Unknown capability scope." }).optional(),
+  requiresApproval: z.boolean({ error: "Requires approval must be a boolean." }),
+  secretKeys: boundedArray(
+    text("Secret key", 64).regex(/^[A-Z][A-Z0-9_]{1,63}$/, { error: "Secret key must use UPPER_SNAKE_CASE." }),
+    16,
+    "Provide up to 16 secret keys.",
+  ),
+  configuredSecrets: boundedArray(text("Secret key", 64), 16, "Provide up to 16 configured keys.").optional(),
+  rest: capabilityRestSpec.optional(),
+  mcp: capabilityMcpSpec.optional(),
+}, { error: "Capability pack must be an object." });
+
+const capabilityArgs = z.custom<Record<string, unknown>>((value) => {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length <= 64;
+}, { error: "Provide up to 64 capability arguments." })
+  .transform((value) => Object.entries(value))
+  .pipe(z.array(z.tuple([
+    text("Argument name", 64),
+    z.union([text("Argument text", 65_536, true), z.number(), z.boolean(), z.null()], { error: "Invalid argument value." }),
+  ])))
+  .transform((entries) => Object.fromEntries(entries));
+
+const missionStepOverride = z.object({
+  stepId: entityId("Step ID"),
+  providerId: providerId.optional(),
+  model: modelName.optional(),
+  effort: effortLevel.optional(),
+}, { error: "Each step override must be an object." });
+
 const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "providers.list": z.object({ refresh: z.boolean({ error: "Refresh must be a boolean." }).optional() }),
   "providers.add": customProvider,
@@ -179,6 +301,7 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   }),
   "workspace.search": searchOptions,
   "workspace.read": z.object({ path: filePath, workspacePath: projectPath.optional() }),
+  "workspace.readBinary": z.object({ path: filePath, workspacePath: projectPath.optional() }),
   "workspace.write": z.object({ path: filePath, text: fileText, revision, workspacePath: projectPath.optional() }),
   "workspace.create": z.object({
     path: filePath,
@@ -281,6 +404,44 @@ const rpcParams: { [Method in RpcMethod]: z.ZodType<RpcParams<Method>> } = {
   "prompts.read": z.object({ ref: promptRef }),
   "prompts.write": z.object({ ref: promptRef, source: text("Prompt source", 1_048_576, true), revision: revision.optional() }),
   "prompts.render": z.object({ ref: promptRef, values: promptValues }),
+  "synapse.matrix": z.object({ workspacePath: projectPath.nullable().optional() }),
+  "synapse.syncArena": z.object({}),
+  "synapse.setOverride": z.object({
+    domain: capabilityDomain,
+    providerId: providerId.nullable(),
+    model: modelName.optional(),
+    effort: effortLevel.optional(),
+    workspacePath: projectPath.nullable().optional(),
+  }),
+  "synapse.recommend": z.object({
+    domain: capabilityDomain,
+    workspacePath: projectPath.nullable().optional(),
+    preferWarmProviderId: providerId.optional(),
+  }),
+  "capabilities.list": z.object({ workspacePath: projectPath.nullable().optional() }),
+  "capabilities.save": z.object({ pack: capabilityPackSchema }),
+  "capabilities.remove": z.object({ id: entityId("Capability ID") }),
+  "capabilities.setSecret": z.object({
+    key: text("Secret key", 64).regex(/^[A-Z][A-Z0-9_]{1,63}$/, { error: "Secret key must use UPPER_SNAKE_CASE." }),
+    value: text("Secret value", 8192).nullable(),
+  }),
+  "capabilities.invoke": z.object({
+    id: entityId("Capability ID"),
+    args: capabilityArgs,
+    workspacePath: projectPath.nullable().optional(),
+    runId: runId.optional(),
+  }),
+  "missions.list": z.object({
+    workspacePath: projectPath.nullable().optional(),
+    limit: integer("Mission limit", 1, 100).optional(),
+  }),
+  "missions.get": z.object({ id: entityId("Mission ID") }),
+  "missions.approve": z.object({
+    id: entityId("Mission ID"),
+    autonomous: z.boolean({ error: "Autonomous must be a boolean." }).optional(),
+    stepOverrides: boundedArray(missionStepOverride, 24, "Provide up to 24 step overrides.").optional(),
+  }),
+  "missions.cancel": z.object({ id: entityId("Mission ID") }),
 };
 
 const requestId = z.union([z.string(), z.int()]);

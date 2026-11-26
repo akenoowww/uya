@@ -196,7 +196,36 @@ try {
   await rpc("runs.closeSession", { conversationId, workspacePath: project.path });
   assert.deepEqual(await rpc("checkpoints.list", { workspacePath: project.path }), []);
 
-  console.log("Core smoke passed: authentication, scoped conversations, streaming, fallback TTFT, cancellation, persistence, search, verify, and provider CRUD.");
+  // v0.5.0 Uya Synapse smoke: Living Capability Matrix, Secret Vault & Hub, Missions, Binary read, and /mcp auth.
+  const matrixSnap = await rpc("synapse.matrix", { workspacePath: project.path });
+  assert.ok(matrixSnap.entriesCount > 0, "Matrix must seed Arena Elo benchmarks");
+  assert.ok(matrixSnap.models.length >= 2, "Matrix must score installed structured providers");
+  const rec = await rpc("synapse.recommend", { domain: "code", workspacePath: project.path });
+  assert.ok(rec && (rec.providerId === "codex" || rec.providerId === "claude"));
+
+  const caps = await rpc("capabilities.list", { workspacePath: project.path });
+  assert.ok(caps.some((pack) => pack.id === "elevenlabs-tts"));
+  assert.ok(caps.some((pack) => pack.id === "suno-music"));
+  assert.ok(caps.some((pack) => pack.id === "fal-image"));
+  const secretState = await rpc("capabilities.setSecret", { key: "ELEVENLABS_API_KEY", value: "sk-smoke-secret-value" });
+  assert.deepEqual(secretState.configuredKeys, ["ELEVENLABS_API_KEY"]);
+  const capsAfterSecret = await rpc("capabilities.list", { workspacePath: project.path });
+  const eleven = capsAfterSecret.find((pack) => pack.id === "elevenlabs-tts");
+  assert.equal(eleven?.enabled, true, "Built-in pack auto-enables once its vault secret is configured");
+  assert.deepEqual(eleven?.configuredSecrets, ["ELEVENLABS_API_KEY"]);
+
+  assert.deepEqual(await rpc("missions.list", { workspacePath: project.path }), []);
+  const binRead = await rpc("workspace.readBinary", { path: "main.ts", workspacePath: project.path });
+  assert.ok(Buffer.from(binRead.base64, "base64").toString("utf8").includes("attached context"));
+
+  const unauthMcp = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+  });
+  assert.equal(unauthMcp.status, 401);
+
+  console.log("Core smoke passed: authentication, scoped conversations, streaming, fallback TTFT, cancellation, persistence, search, verify, Synapse matrix/hub/MCP, and provider CRUD.");
 } finally {
   await server?.close();
   await rm(fixture, { recursive: true, force: true });

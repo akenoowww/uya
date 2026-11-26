@@ -1,27 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActionIcon, Badge, Button, Collapse, Group, Kbd, Loader, Paper, Stack, Text, UnstyledButton,
+  ActionIcon, Badge, Button, Collapse, Group, Kbd, Loader, Menu, Paper, Stack, Text, UnstyledButton,
 } from "@mantine/core";
 import { useClipboard } from "@mantine/hooks";
 import {
-  ArrowClockwise, ArrowCounterClockwise, ArrowDown, ArrowUp, CaretDown, CaretRight, Check, Copy,
-  Files, FileText, FolderOpen, GitFork, Globe, Lightning, MagnifyingGlass, NotePencil, PencilSimple,
-  Play, ShieldCheck, Stop, StopCircle, Terminal, TerminalWindow, Wrench, X,
+  ArrowBendUpRight, ArrowClockwise, ArrowCounterClockwise, ArrowDown, ArrowUp, CaretDown, CaretRight, Check,
+  ColumnsPlusRight, Copy, Files, FileText, FolderOpen, GitFork, Globe, Lightning, MagnifyingGlass, NotePencil,
+  PencilSimple, Play, ShieldCheck, Stop, StopCircle, Terminal, TerminalWindow, Wrench, X,
 } from "@phosphor-icons/react";
 import type {
-  ApprovalDecision, ApprovalRequest, EffortLevel, Provider, RpcCall, RunDetail, RunEvent,
-  RunSummary, ToolKind, ToolMeta,
+  ApprovalDecision, ApprovalRequest, ArtifactItem, EffortLevel, MissionPlan, Provider, RpcCall, RpcParams,
+  RunDetail, RunEvent, RunSummary, SynapseCallInfo, ToolKind, ToolMeta,
 } from "@ide/protocol";
 import type { Bridge } from "./bridge";
 import { ACCESS_MODE_META, AccessModePicker } from "./components/AccessModePicker";
+import { ArtifactCard } from "./components/ArtifactCard";
 import { EFFORT_META, EffortPicker } from "./components/EffortPicker";
 import { MarkdownView } from "./components/MarkdownView";
 import type { ApplyPreviewRequest } from "./components/MarkdownView";
 import { MentionMenu } from "./components/MentionMenu";
+import { MissionCard } from "./components/MissionCard";
 import { ModelPicker } from "./components/ModelPicker";
 import { ProviderIcon } from "./components/ProviderIcon";
 import { ProviderPicker } from "./components/ProviderPicker";
 import { SlashMenu } from "./components/SlashMenu";
+import { SynapseCallCard } from "./components/SynapseCallCard";
 import { HintTooltip } from "./components/Tooltip";
 import { useMentionInput } from "./hooks/useMentionInput";
 import { useSlashInput } from "./hooks/useSlashInput";
@@ -43,11 +46,15 @@ export function RunStatus({ run }: { run: RunSummary | undefined }) {
 
 type GroupedEvent =
   | { seq: number; type: "text" | "thinking"; text: string }
-  | { seq: number; type: "tool"; text: string; meta?: ToolMeta };
+  | { seq: number; type: "tool"; text: string; meta?: ToolMeta }
+  | { seq: number; type: "synapse_call"; call: SynapseCallInfo }
+  | { seq: number; type: "artifact"; artifact: ArtifactItem }
+  | { seq: number; type: "mission_proposed"; mission: MissionPlan };
 
 function groupEvents(events: RunEvent[]): GroupedEvent[] {
   const groups: GroupedEvent[] = [];
   const toolIndexById = new Map<string, number>();
+  const synapseIndexById = new Map<string, number>();
 
   for (const event of events) {
     if (event.type === "text" || event.type === "thinking") {
@@ -69,6 +76,27 @@ function groupEvents(events: RunEvent[]): GroupedEvent[] {
       }
       if (toolId) toolIndexById.set(toolId, groups.length);
       groups.push({ seq: event.seq, type: "tool", text: event.text, meta: event.meta });
+      continue;
+    }
+    if (event.type === "synapse_call") {
+      const existingIdx = synapseIndexById.get(event.call.id);
+      if (existingIdx !== undefined) {
+        const existing = groups[existingIdx];
+        if (existing?.type === "synapse_call") {
+          existing.call = event.call;
+          continue;
+        }
+      }
+      synapseIndexById.set(event.call.id, groups.length);
+      groups.push({ seq: event.seq, type: "synapse_call", call: event.call });
+      continue;
+    }
+    if (event.type === "artifact") {
+      groups.push({ seq: event.seq, type: "artifact", artifact: event.artifact });
+      continue;
+    }
+    if (event.type === "mission_proposed") {
+      groups.push({ seq: event.seq, type: "mission_proposed", mission: event.mission });
     }
   }
   return groups;
@@ -280,28 +308,54 @@ function terminalArgsFor(provider: Provider | undefined, model: string | undefin
   return provider.terminalArgs;
 }
 
+export interface PeerSplitTarget {
+  id: string;
+  title: string;
+  providerId?: string;
+}
+
+type MissionStepOverride = NonNullable<RpcParams<"missions.approve">["stepOverrides"]>[number];
+
 export function Transcript({
   detail,
   providers,
+  cwd,
+  rpc,
+  missionsById,
+  peerSplits,
+  sourceAlias,
   onRetry,
   onFork,
   onOpenUrl,
   onOpenFile,
+  onAttachFile,
   onPreviewDiff,
   onRunCommand,
   onRespondApproval,
   onRestoreCheckpoint,
+  onApproveMission,
+  onCancelMission,
+  onForwardReply,
 }: {
   detail: RunDetail;
   providers: Provider[];
+  cwd?: string | null;
+  rpc?: RpcCall;
+  missionsById?: Record<string, MissionPlan>;
+  peerSplits?: PeerSplitTarget[];
+  sourceAlias?: string;
   onRetry?: (prompt: string) => void;
   onFork?: (runId: string) => void;
   onOpenUrl?: (url: string) => void;
   onOpenFile?: (path: string, line?: number) => void;
+  onAttachFile?: (path: string) => void;
   onPreviewDiff?: (request: ApplyPreviewRequest) => void;
   onRunCommand?: (command: string) => void;
   onRespondApproval?: (runId: string, requestId: string, decision: ApprovalDecision) => Promise<void> | void;
   onRestoreCheckpoint?: (checkpointId: string) => Promise<void> | void;
+  onApproveMission?: (id: string, options: { autonomous: boolean; stepOverrides: MissionStepOverride[] }) => Promise<void> | void;
+  onCancelMission?: (id: string) => Promise<void> | void;
+  onForwardReply?: (targetPaneId: string | "new", sourceAlias: string, sourceProviderId: string, replyText: string) => void;
 }) {
   const clipboard = useClipboard({ timeout: 1600 });
   const [confirmUndo, setConfirmUndo] = useState(false);
@@ -351,7 +405,16 @@ export function Transcript({
   return (
     <article className="transcript">
       <Paper p="8px 11px" withBorder radius="md" className="prompt-turn">
-        <Text size="11px" fw={630} c="iris.3" mb={3}>You</Text>
+        <Group gap={6} mb={3} wrap="nowrap">
+          <Text size="11px" fw={630} c="iris.3">
+            {run.originActor ? `From @${run.originActor.alias}` : "You"}
+          </Text>
+          {run.originActor && (
+            <Badge size="xs" variant="light" color="iris">
+              {run.originActor.kind.replaceAll("_", " ")}
+            </Badge>
+          )}
+        </Group>
         <Text size="sm" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.55 }}>
           {run.prompt}
         </Text>
@@ -394,11 +457,30 @@ export function Transcript({
                   onPreviewDiff={onPreviewDiff}
                   onRunCommand={onRunCommand}
                 />
+              ) : group.type === "synapse_call" ? (
+                <SynapseCallCard key={group.seq} call={group.call} />
+              ) : group.type === "artifact" ? (
+                <ArtifactCard
+                  key={group.seq}
+                  artifact={group.artifact}
+                  workspacePath={cwd ?? null}
+                  rpc={rpc}
+                  onOpenFile={onOpenFile ? (path) => onOpenFile(path) : undefined}
+                  onAttachFile={onAttachFile}
+                />
+              ) : group.type === "mission_proposed" ? (
+                <MissionCard
+                  key={group.seq}
+                  mission={missionsById?.[group.mission.id] ?? group.mission}
+                  providers={providers}
+                  onApprove={onApproveMission}
+                  onCancel={onCancelMission}
+                />
               ) : group.type === "tool" && group.meta ? (
                 <ToolCard key={group.seq} text={group.text} meta={group.meta} onOpenFile={onOpenFile} />
-              ) : (
+              ) : group.type === "thinking" || group.type === "tool" ? (
                 <DisclosureBlock key={group.seq} type={group.type} text={group.text} />
-              ))}
+              ) : null)}
               {index === attempts.length - 1 && pendingApprovals.length > 0 && onRespondApproval && (
                 pendingApprovals.map((req) => (
                   <ApprovalCard
@@ -489,6 +571,40 @@ export function Transcript({
                 {clipboard.copied ? "Copied" : "Copy"}
               </Button>
             )}
+            {fullReplyText && onForwardReply && run.status === "succeeded" && (
+              <Menu position="top-end" width={220} withinPortal>
+                <Menu.Target>
+                  <Button
+                    size="compact-xs"
+                    variant="subtle"
+                    color="gray"
+                    leftSection={<ArrowBendUpRight size={12} />}
+                    aria-label="Forward reply to another split"
+                  >
+                    Forward
+                  </Button>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  <Menu.Label>Bounce reply to split</Menu.Label>
+                  {(peerSplits ?? []).map((peer) => (
+                    <Menu.Item
+                      key={peer.id}
+                      leftSection={<ProviderIcon providerId={peer.providerId} size={13} framed={false} />}
+                      onClick={() => onForwardReply(peer.id, sourceAlias ?? run.providerId, run.providerId, fullReplyText)}
+                    >
+                      <Text size="xs" truncate="end">{peer.title}</Text>
+                    </Menu.Item>
+                  ))}
+                  {(peerSplits?.length ?? 0) > 0 && <Menu.Divider />}
+                  <Menu.Item
+                    leftSection={<ColumnsPlusRight size={13} />}
+                    onClick={() => onForwardReply("new", sourceAlias ?? run.providerId, run.providerId, fullReplyText)}
+                  >
+                    <Text size="xs">Send to new split</Text>
+                  </Menu.Item>
+                </Menu.Dropdown>
+              </Menu>
+            )}
             {onFork && run.conversationId && run.status === "succeeded" && (
               <Button
                 size="compact-xs"
@@ -536,6 +652,9 @@ interface Props {
   bridge: Bridge | null;
   rpc: RpcCall | undefined;
   cwd: string | null;
+  sourceAlias?: string;
+  peerSplits?: PeerSplitTarget[];
+  missionsById?: Record<string, MissionPlan>;
   recentWorkspaces?: string[];
   onPickProject?: (recentPath?: string) => void;
   onDraftChange: (value: string) => void;
@@ -544,6 +663,9 @@ interface Props {
   onCancel: (id: string) => void;
   onRespondApproval?: (runId: string, requestId: string, decision: ApprovalDecision) => Promise<void> | void;
   onRestoreCheckpoint?: (checkpointId: string) => Promise<void> | void;
+  onApproveMission?: (id: string, options: { autonomous: boolean; stepOverrides: MissionStepOverride[] }) => Promise<void> | void;
+  onCancelMission?: (id: string) => Promise<void> | void;
+  onForwardReply?: (targetPaneId: string | "new", sourceAlias: string, sourceProviderId: string, replyText: string) => void;
   onNewConversation: () => void;
   onOpenProviders: () => void;
   onRefreshProviders?: () => Promise<void> | void;
@@ -559,8 +681,10 @@ interface Props {
 
 export function RunPane({
   id, provider, providers, config, details, draft, promptHistory, busy, connected, choosingProject,
-  contextCount, hasSelection, bridge, rpc, cwd, recentWorkspaces = [], onPickProject,
+  contextCount, hasSelection, bridge, rpc, cwd, sourceAlias, peerSplits, missionsById,
+  recentWorkspaces = [], onPickProject,
   onDraftChange, onSend, onConfig, onCancel, onRespondApproval, onRestoreCheckpoint,
+  onApproveMission, onCancelMission, onForwardReply,
   onNewConversation, onOpenProviders, onRefreshProviders, onAttachFile, onAttachGitDiff, onAttachTerminal,
   onForkFromRun, onOpenUrl, onOpenFile, onPreviewDiff, onRunCommand,
 }: Props) {
@@ -760,14 +884,23 @@ export function RunPane({
                   key={detail.run.id}
                   detail={detail}
                   providers={providers}
+                  cwd={cwd}
+                  rpc={rpc}
+                  missionsById={missionsById}
+                  peerSplits={peerSplits}
+                  sourceAlias={sourceAlias}
                   onRetry={provider?.structured && !busy ? (prompt) => onSend(prompt) : undefined}
                   onFork={onForkFromRun}
                   onOpenUrl={onOpenUrl}
                   onOpenFile={onOpenFile}
+                  onAttachFile={onAttachFile}
                   onPreviewDiff={onPreviewDiff}
                   onRunCommand={onRunCommand}
                   onRespondApproval={onRespondApproval}
                   onRestoreCheckpoint={onRestoreCheckpoint}
+                  onApproveMission={onApproveMission}
+                  onCancelMission={onCancelMission}
+                  onForwardReply={onForwardReply}
                 />
               )) : !cwd ? (
                 <Stack align="center" justify="center" gap="sm" flex={1} p="lg" ta="center">

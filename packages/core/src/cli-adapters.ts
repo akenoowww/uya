@@ -5,7 +5,7 @@ import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { runAcpCli } from "./acp-runner";
 import { CliResponseError, type CliPrepare } from "./agents";
-import { claudeIsolationArgs } from "./claude";
+import { claudeIsolationArgs, mcpServersForMode } from "./claude";
 import { classifyCliDiagnostic } from "./cli-diagnostics";
 import { isSafeCliModelName } from "./cli-models";
 import { customCliCommand, customStructuredBlockReason } from "./custom-cli";
@@ -441,7 +441,19 @@ export const prepareCodex: CliPrepare = (request, _cwd, usage) => {
   const level = effort === "minimal" ? "low" : effort;
   // TOML also accepts single quotes, which Windows command shims can pass through.
   const shim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(request.provider.command ?? "");
-  const quote = shim ? "'" : '"';
+  const tomlString = (value: string): string => {
+    if (!shim) return JSON.stringify(value).replaceAll("\x7f", "\\u007f");
+    if (/'''|[\x00-\x08\x0a-\x1f\x7f]/.test(value)) {
+      throw new AdapterError("The MCP command or argument cannot be passed through a Codex Windows command shim.");
+    }
+    const quote = value.includes("'") ? "'''" : "'";
+    return `${quote}${value}${quote}`;
+  };
+  const activeMcpServers = mcpServersForMode(mode, request.mcpServers);
+  const mcpArgs = activeMcpServers.flatMap(({ name, command, args }) => [
+    "-c", `mcp_servers.${name}.command=${tomlString(command)}`,
+    "-c", `mcp_servers.${name}.args=[${args.map(tomlString).join(",")}]`,
+  ]);
   const sandbox = ["--sandbox", mode === "agent" ? "workspace-write" : "read-only", ...(cwd ? ["-C", cwd] : [])];
   // Codex's resume subcommand accepts JSON output but takes sandbox and cwd from its parent.
   const exec = sessionId
@@ -450,8 +462,9 @@ export const prepareCodex: CliPrepare = (request, _cwd, usage) => {
   const args = [
     ...modelArgs(request), "--ask-for-approval", "never",
     ...(mode === "isolated" ? ["--disable", "shell_tool"] : []),
-    ...codexFeatureArgs, "-c", `web_search=${quote}disabled${quote}`,
-    ...(level ? ["-c", `model_reasoning_effort=${quote}${level}${quote}`] : []),
+    ...codexFeatureArgs, "-c", `web_search=${tomlString("disabled")}`,
+    ...(level ? ["-c", `model_reasoning_effort=${tomlString(level)}`] : []),
+    ...mcpArgs,
     ...exec, "--skip-git-repo-check",
     ...(!cwd || !request.conversationKey ? ["--ephemeral"] : []),
     "--ignore-user-config", "--ignore-rules", "-",
@@ -465,7 +478,7 @@ export const prepareCodex: CliPrepare = (request, _cwd, usage) => {
 export const prepareClaude: CliPrepare = async (request, scratchDir, usage) => {
   const { mode, cwd } = cliAccess(request);
   const sessionId = cwd ? safeSessionId(request.providerSessionId) : undefined;
-  const isolationArgs = await claudeIsolationArgs(scratchDir, mode);
+  const isolationArgs = await claudeIsolationArgs(scratchDir, mode, request.mcpServers);
   const accessArgs = cwd && request.conversationKey
     ? isolationArgs.filter((arg) => arg !== "--no-session-persistence")
     : isolationArgs;
@@ -515,7 +528,7 @@ export function geminiBlocked() {
 
 export const prepareGeminiCli: CliPrepare = async (request, scratchDir, usage) => {
   const { mode, cwd } = cliAccess(request);
-  const invocation = await geminiCliInvocation(scratchDir, "stream-json", request.effort, mode);
+  const invocation = await geminiCliInvocation(scratchDir, "stream-json", request.effort, mode, request.mcpServers);
   const args = [...modelArgs(request), ...invocation.args];
   return {
     args, cwd, configDir: scratchDir,
@@ -586,11 +599,13 @@ export function openCodeBlocked() {
 
 export const prepareOpenCode: CliPrepare = (request, scratchDir, usage) => {
   const { mode, cwd } = cliAccess(request);
+  const activeMcpServers = mcpServersForMode(mode, request.mcpServers);
   // OpenCode uses the last matching rule, so list the default before the exceptions.
   const permission = {
     "*": "deny",
     ...(mode !== "isolated" ? { read: "allow", glob: "allow", grep: "allow", list: "allow" } : {}),
     ...(mode === "agent" ? { edit: "allow", write: "allow" } : {}),
+    ...Object.fromEntries(activeMcpServers.map(({ name }) => [`${name}_*`, "allow"])),
   };
   const agent = `uya-structured-${crypto.randomUUID()}`;
   const variant = normalizeEffortLevel(request.effort);
@@ -622,6 +637,11 @@ export const prepareOpenCode: CliPrepare = (request, scratchDir, usage) => {
         share: "disabled",
         permission,
         agent: { [agent]: { mode: "primary", permission, variant } },
+        ...(activeMcpServers.length ? {
+          mcp: Object.fromEntries(activeMcpServers.map(({ name, command, args, env }) => [
+            name, { type: "local", command: [command, ...args], enabled: true, ...(env ? { environment: env } : {}) },
+          ])),
+        } : {}),
       }),
     },
   };

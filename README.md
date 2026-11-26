@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The local-first multi-agent AI workbench for macOS and Windows.</strong><br />
-  Run Codex, Claude Code, Antigravity, Gemini, OpenCode, and local models side-by-side — with live workspace exploration, isolated Git Worktree Arenas, inline tool approvals, ripgrep search, built-in Git, and reversible checkpoints.
+  Run Codex, Claude Code, Antigravity, Gemini, OpenCode, and local models side-by-side — with <strong>Uya Synapse</strong> symbiotic specialist delegation, Arena Elo + local telemetry routing, multimodal Capability Hub (ElevenLabs, Suno, fal.ai, custom MCP/REST), isolated Git Worktree Arenas, inline tool approvals, ripgrep search, built-in Git, and reversible checkpoints.
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md"><strong>English</strong></a> · <a href="README.kk.md">Қазақша</a> · <a href="docs/arena.md">Worktree Arena</a> · <a href="docs/providers.md">Providers</a> · <a href="docs/architecture.md">Architecture</a> · <a href="docs/security.md">Security</a>
+  <a href="README.md"><strong>English</strong></a> · <a href="README.kk.md">Қазақша</a> · <a href="docs/synapse.md">Uya Synapse</a> · <a href="docs/arena.md">Worktree Arena</a> · <a href="docs/providers.md">Providers</a> · <a href="docs/architecture.md">Architecture</a> · <a href="docs/security.md">Security</a>
 </p>
 
 <p align="center">
@@ -76,7 +76,19 @@ Read the full guide in [docs/arena.md](docs/arena.md).
 
 ---
 
-### 3. Persistent Live Sessions, Tool Cards & Reversible Checkpoints
+### 3. Uya Synapse — Symbiotic Specialist Routing & Multimodal Capability Hub
+
+Agents inside Uya aren't blind isolated subprocesses — through an ephemeral per-run **`uya` MCP server** (`--mcp-stdio`), every MCP-capable CLI (`Codex`, `Claude Code`, `Antigravity`, `Gemini CLI`, `OpenCode`) and local runtime knows it runs inside Uya and can collaborate safely:
+
+- **Living Capability Matrix (`/matrix`)**: Combines **`arena.ai` Elo benchmarks** (`code`, `webdev`, `text`, `vision`, `search`) with your own local Verify pass rates, Worktree Arena wins, TTFT speed, and a warm-session cache bonus so agents only delegate when another installed model has a clear edge.
+- **Specialist Consultation, Red Team & Gatekeeper Missions (`/mission`)**: Agents can call `uya_consult_specialist` (keeping their own warm session intact), `uya_red_team` (parallel Security / Edge-Case / Architecture critiques), or `uya_propose_mission` (interactive multi-step plan cards where you can swap providers or effort per step before approving). You can also **Forward** any reply to another split in one click.
+- **Open Capability Hub & `0600` Secret Vault (`/capabilities`)**: Configure API keys once in Uya's owner-only vault (`ELEVENLABS_API_KEY`, `SUNO_API_KEY`, `FAL_KEY`, `OPENAI_API_KEY`, or custom keys) to unlock built-in **ElevenLabs Voiceover**, **Suno Music**, **fal.ai FLUX Image**, **OpenAI Speech**, or custom **REST / MCP** packs — saving confined workspace assets with inline `<audio>`, `<img>`, and `<video>` preview cards.
+
+Read the full guide in [docs/synapse.md](docs/synapse.md).
+
+---
+
+### 4. Persistent Live Sessions, Tool Cards & Reversible Checkpoints
 
 - **Warm sessions & prompt cache hits**: ACP agents (`agy`) stay warm in `AcpSessionPool`, while **Codex** and **Claude Code** resume native CLI sessions across turns — displaying live cache-hit ratios (`92% cached`) and estimated run cost in both transcripts and Usage Insights.
 - **Structured tool cards & inline approvals**: Watch agents read, search, edit, or execute commands in collapsible cards with clickable file links. When an ACP agent requests a mutating action, approve once, allow for the session, or deny directly inline.
@@ -84,7 +96,7 @@ Read the full guide in [docs/arena.md](docs/arena.md).
 
 ---
 
-### 4. Daily-Driver IDE Tools Built In
+### 5. Daily-Driver IDE Tools Built In
 
 - **Workspace Code Search (`⌘⇧F` / `Ctrl+Shift+F`)**: Powered by **ripgrep (`rg --json`)** with a confined native TypeScript fallback — case/word/regex/glob filters, jump-to-line in Monaco, and one-click attach of matching files to prompt context.
 - **Full Local Git Client (`⌘⇧G` / `Ctrl+Shift+G`)**: Stage/unstage individual files or all changes, discard with confirmation, switch or create branches (also available in the bottom status bar), inspect commit history, and generate Conventional Commit messages with one click.
@@ -185,6 +197,9 @@ Download the latest native installer from [GitHub Releases](https://github.com/a
 | `/model <version>` | Switch model version (or `/model default`) |
 | `/effort <level>` | Set reasoning effort (`auto`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `/judge` | Cross-review or synthesize latest broadcast or arena patches |
+| `/synapse` · `/matrix` | Open Uya Synapse Living Capability Matrix &amp; Arena Elo sync |
+| `/capabilities` · `/vault` | Configure ElevenLabs, Suno, fal.ai, REST &amp; MCP capability packs |
+| `/mission` | Review, approve, or stop multi-agent missions |
 | `/new` | Start a fresh conversation and close active live session |
 
 </details>
@@ -219,7 +234,8 @@ bun run desktop:test
 
 ## Documentation
 
-- **[Architecture](docs/architecture.md)** — Tauri shell, loopback Bun sidecar, ACP session pool, SQLite v4 schema, and async verification flow.
+- **[Uya Synapse](docs/synapse.md)** — Ephemeral `uya` MCP broker, Living Capability Matrix (`arena.ai` + local telemetry), Gatekeeper Missions, and Open Capability Hub.
+- **[Architecture](docs/architecture.md)** — Tauri shell, loopback Bun sidecar, ACP session pool, SQLite v5 schema, and async verification flow.
 - **[Worktree Agent Arena](docs/arena.md)** — Isolated parallel coding, WIP seeding, per-slot verification, patch cross-review, and atomic winner apply.
 - **[Providers & Local Runtimes](docs/providers.md)** — Full adapter capability matrix, access mode flags, live discovery, and Custom CLI sandboxing.
 - **[Security Model](docs/security.md)** — Loopback bearer auth, workspace confinement, protected paths, hardened Git execution, and fail-closed approvals.

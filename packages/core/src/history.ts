@@ -2,9 +2,10 @@ import { Database } from "bun:sqlite";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import type {
-  ApprovalDecision, ApprovalRequest, ArenaSummary, CheckpointSummary, ConversationSummary,
-  ExecutionMode, Provider, ProviderUsageStats,
-  RoutingRule, RunDetail, RunEvent, RunInput, RunSummary, ToolMeta, UsageStats,
+  ApprovalDecision, ApprovalRequest, ArenaBenchmarkEntry, ArenaSummary, ArtifactItem, CapabilityDomain,
+  CapabilityPack, CheckpointSummary, ConversationSummary, DomainPreferenceOverride, ExecutionMode,
+  MissionPlan, Provider, ProviderUsageStats, RoutingRule, RunDetail, RunEvent, RunInput, RunSummary,
+  SynapseCallInfo, ToolMeta, UiCommand, UsageStats,
 } from "@ide/protocol";
 import { migrateHistory } from "./history-migrations";
 import { RpcError } from "./validation";
@@ -14,7 +15,21 @@ export type RunEventPayload =
   | { type: "tool"; text: string; meta?: ToolMeta }
   | { type: "approval_request"; request: ApprovalRequest }
   | { type: "approval_resolved"; requestId: string; decision: ApprovalDecision }
+  | { type: "artifact"; artifact: ArtifactItem }
+  | { type: "synapse_call"; call: SynapseCallInfo }
+  | { type: "mission_proposed"; mission: MissionPlan }
+  | { type: "ui_command"; command: UiCommand }
   | { type: "status"; run: RunSummary };
+
+export interface ModelOutcomeRow {
+  workspace: string;
+  providerId: string;
+  model: string;
+  verifyPassed: number;
+  verifyTotal: number;
+  arenaWins: number;
+  updatedAt: number;
+}
 
 type StoredValue = { value: string };
 type HistoryFilters = { query?: string; workspacePath?: string | null };
@@ -541,6 +556,167 @@ export class History {
     return true;
   }
 
+  replaceArenaRatings(entries: readonly ArenaBenchmarkEntry[], syncedAt: number, source: string): void {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM arena_ratings");
+      const stmt = this.db.prepare(
+        "INSERT INTO arena_ratings (model_slug, domain, display_name, organization, elo, rank, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (const entry of entries) {
+        stmt.run(
+          entry.modelSlug,
+          entry.domain,
+          entry.displayName,
+          entry.organization ?? null,
+          entry.elo,
+          entry.rank,
+          entry.updatedAt,
+        );
+      }
+      this.saveObjectSetting("arenaRatingsMeta", { syncedAt, source });
+    }).immediate();
+  }
+
+  listArenaRatings(): { syncedAt: number | null; source: string; entries: ArenaBenchmarkEntry[] } {
+    const meta = this.objectSetting<{ syncedAt: number | null; source: string }>("arenaRatingsMeta") ?? {
+      syncedAt: null,
+      source: "builtin-seed",
+    };
+    const rows = this.db.query<{
+      model_slug: string;
+      domain: CapabilityDomain;
+      display_name: string;
+      organization: string | null;
+      elo: number;
+      rank: number;
+      updated_at: number;
+    }, []>("SELECT * FROM arena_ratings ORDER BY domain ASC, rank ASC").all();
+    return {
+      syncedAt: meta.syncedAt,
+      source: meta.source,
+      entries: rows.map((row) => ({
+        modelSlug: row.model_slug,
+        domain: row.domain,
+        displayName: row.display_name,
+        ...(row.organization ? { organization: row.organization } : {}),
+        elo: row.elo,
+        rank: row.rank,
+        updatedAt: row.updated_at,
+      })),
+    };
+  }
+
+  recordModelOutcome(
+    workspace: string | undefined | null,
+    providerId: string,
+    model: string | undefined,
+    delta: { verifyPassed?: number; verifyTotal?: number; arenaWins?: number },
+  ): void {
+    this.db.run(`
+      INSERT INTO model_outcomes (workspace, provider_id, model, verify_passed, verify_total, arena_wins, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (workspace, provider_id, model) DO UPDATE SET
+        verify_passed = model_outcomes.verify_passed + excluded.verify_passed,
+        verify_total = model_outcomes.verify_total + excluded.verify_total,
+        arena_wins = model_outcomes.arena_wins + excluded.arena_wins,
+        updated_at = excluded.updated_at
+    `, [
+      workspace ?? "",
+      providerId,
+      model ?? "",
+      delta.verifyPassed ?? 0,
+      delta.verifyTotal ?? 0,
+      delta.arenaWins ?? 0,
+      Date.now(),
+    ]);
+  }
+
+  listModelOutcomes(workspace?: string | null): ModelOutcomeRow[] {
+    const rows = workspace !== undefined && workspace !== null
+      ? this.db.query<{
+          workspace: string; provider_id: string; model: string;
+          verify_passed: number; verify_total: number; arena_wins: number; updated_at: number;
+        }, [string]>(
+          "SELECT * FROM model_outcomes WHERE workspace = ? OR workspace = '' ORDER BY updated_at DESC",
+        ).all(workspace)
+      : this.db.query<{
+          workspace: string; provider_id: string; model: string;
+          verify_passed: number; verify_total: number; arena_wins: number; updated_at: number;
+        }, []>("SELECT * FROM model_outcomes ORDER BY updated_at DESC").all();
+    return rows.map((row) => ({
+      workspace: row.workspace,
+      providerId: row.provider_id,
+      model: row.model,
+      verifyPassed: row.verify_passed,
+      verifyTotal: row.verify_total,
+      arenaWins: row.arena_wins,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  recentRuns(limit = 400): RunSummary[] {
+    return this.db.query<StoredValue, [number]>(
+      "SELECT value FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?",
+    ).all(limit).map(({ value }) => JSON.parse(value) as RunSummary);
+  }
+
+  synapseOverrides(): Partial<Record<CapabilityDomain, DomainPreferenceOverride>> {
+    return this.objectSetting<Partial<Record<CapabilityDomain, DomainPreferenceOverride>>>("synapseOverrides") ?? {};
+  }
+
+  setSynapseOverride(domain: CapabilityDomain, override: DomainPreferenceOverride | null): Partial<Record<CapabilityDomain, DomainPreferenceOverride>> {
+    const current = { ...this.synapseOverrides() };
+    if (override === null) delete current[domain];
+    else current[domain] = override;
+    this.saveObjectSetting("synapseOverrides", current);
+    return current;
+  }
+
+  saveMission(mission: MissionPlan): void {
+    this.db.run(`
+      INSERT INTO missions (id, workspace, created_at, updated_at, status, value)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET
+        workspace = excluded.workspace,
+        updated_at = excluded.updated_at,
+        status = excluded.status,
+        value = excluded.value
+    `, [mission.id, mission.workspacePath ?? "", mission.createdAt, mission.updatedAt, mission.status, JSON.stringify(mission)]);
+  }
+
+  getMission(id: string): MissionPlan | undefined {
+    const row = this.db.query<StoredValue, [string]>("SELECT value FROM missions WHERE id = ?").get(id);
+    return row ? JSON.parse(row.value) as MissionPlan : undefined;
+  }
+
+  listMissions(workspacePath?: string | null, limit = 20): MissionPlan[] {
+    const filter = workspacePath === undefined ? undefined : (workspacePath ?? "");
+    return this.db.query<StoredValue, (string | number)[]>(`
+      SELECT value FROM missions ${filter === undefined ? "" : "WHERE workspace = ?"}
+      ORDER BY updated_at DESC, rowid DESC LIMIT ?
+    `).all(...(filter === undefined ? [] : [filter]), limit)
+      .map(({ value }) => JSON.parse(value) as MissionPlan);
+  }
+
+  saveCapability(pack: CapabilityPack): void {
+    const clean = { ...pack };
+    delete clean.configuredSecrets;
+    this.db.run(`
+      INSERT INTO capabilities (id, updated_at, value) VALUES (?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, value = excluded.value
+    `, [clean.id, Date.now(), JSON.stringify(clean)]);
+  }
+
+  listSavedCapabilities(): CapabilityPack[] {
+    return this.db.query<StoredValue, []>("SELECT value FROM capabilities ORDER BY updated_at ASC")
+      .all()
+      .map(({ value }) => JSON.parse(value) as CapabilityPack);
+  }
+
+  removeCapability(id: string): boolean {
+    return this.db.run("DELETE FROM capabilities WHERE id = ?", [id]).changes > 0;
+  }
+
   close() {
     this.db.close();
   }
@@ -591,6 +767,18 @@ export class History {
   }
 
   private saveSetting<T>(key: string, value: T[]) {
+    this.db.run(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      [key, JSON.stringify(value)],
+    );
+  }
+
+  private objectSetting<T extends object>(key: string): T | undefined {
+    const row = this.db.query<StoredValue, [string]>("SELECT value FROM settings WHERE key = ?").get(key);
+    return row ? JSON.parse(row.value) as T : undefined;
+  }
+
+  private saveObjectSetting<T extends object>(key: string, value: T) {
     this.db.run(
       "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
       [key, JSON.stringify(value)],

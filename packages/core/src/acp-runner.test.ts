@@ -1,10 +1,11 @@
 import type { ApprovalDecision, ToolMeta } from "@ide/protocol";
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, realpathSync } from "node:fs";
+import { mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { closeAcpConversation, runAcpCli, shutdownAcpSessions } from "./acp-runner";
-import type { AdapterApprovalPrompt, AdapterRequest } from "./provider-adapter";
+import type { AdapterApprovalPrompt, AdapterRequest, McpStdioServerSpec } from "./provider-adapter";
 import { AcpSessionPool, type AcpSession } from "./session-pool";
 
 const workspace = realpathSync(process.cwd());
@@ -13,6 +14,9 @@ const permissionOptions = [
   { optionId: "permit-session", kind: "allow_always", name: "Allow for session" },
   { optionId: "deny", kind: "reject_once", name: "Reject" },
 ];
+const uyaMcpServer = {
+  name: "uya", command: "/fixture/uya", args: ["--stdio"], env: { UYA_FIXTURE: "enabled" },
+} satisfies McpStdioServerSpec;
 
 interface FixturePermission {
   toolCall: Record<string, unknown>;
@@ -24,6 +28,12 @@ interface Fixture {
   updates?: Record<string, unknown>[];
   usage?: Record<string, number>;
   exitDuringPrompt?: boolean;
+  readBridgeConfig?: "startup" | "prompt";
+}
+
+interface BridgeConfig {
+  url: string;
+  token: string;
 }
 
 interface FixtureLog {
@@ -31,9 +41,11 @@ interface FixtureLog {
   pid: number;
   requests: { id: number; method: string; params: Record<string, unknown> }[];
   decisions: { outcome: string; optionId?: string }[];
+  bridge?: { path: string; config: BridgeConfig };
 }
 
 const fixtureProgram = String.raw`
+import { accessSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const sessionId = "fixture-" + process.pid;
@@ -43,6 +55,8 @@ let promptId;
 let permissionIndex = 0;
 let model = "fixture-default";
 let effort = "low";
+let bridgePath;
+let startupBridgeConfig;
 
 function send(message) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
@@ -72,7 +86,8 @@ function nextPermission() {
     });
     return;
   }
-  const log = { pid: process.pid, cwd: process.cwd(), requests, decisions };
+  const bridge = bridgePath && { path: bridgePath, config: startupBridgeConfig ?? JSON.parse(readFileSync(bridgePath, "utf8")) };
+  const log = { pid: process.pid, cwd: process.cwd(), requests, decisions, bridge };
   update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(log) } });
   reply(promptId, { stopReason: "end_turn", usage: fixture.usage ?? { inputTokens: 21, cachedInputTokens: 4, outputTokens: 9 } });
 }
@@ -82,6 +97,11 @@ const methods = {
     reply(message.id, { protocolVersion: 1 });
   },
   "session/new"(message) {
+    if (fixture.readBridgeConfig) {
+      bridgePath = message.params.mcpServers.find(({ name }) => name === "uya").args.at(-1);
+      accessSync(bridgePath);
+      if (fixture.readBridgeConfig === "startup") startupBridgeConfig = JSON.parse(readFileSync(bridgePath, "utf8"));
+    }
     reply(message.id, { sessionId, configOptions: configOptions(), models: { availableModels: [{ modelId: "fixture-legacy" }] } });
   },
   "session/set_config_option"(message) {
@@ -227,6 +247,53 @@ test("agent mode without a working directory falls back to isolated permissions"
   expect(approvals).toBe(0);
 });
 
+test.each(["read-only", "agent"] as const)("ACP configures MCP and allows injected Uya tools in %s mode", async (accessMode) => {
+  const approvals: string[] = [];
+  const { log } = await runFixture({
+    updates: [{ sessionUpdate: "tool_call", toolCallId: "uya-tool", title: "uya_delegate" }],
+    tools: [
+      { toolCall: { name: "uya_search" } },
+      { toolCall: { toolName: "mcp__uya__delegate" } },
+      { toolCall: { toolCallId: "uya-tool" } },
+      { toolCall: { name: "uya_lookup" }, options: permissionOptions.slice(1) },
+      { toolCall: { name: "uya_lookup" }, options: permissionOptions.slice(2) },
+      { toolCall: { name: "mcp__other-MCP__tool" } },
+      { toolCall: { name: "terminal", title: "uya_lookup" } },
+    ],
+  }, {
+    accessMode, workspacePath: workspace,
+    mcpServers: [uyaMcpServer, { name: "other-MCP", command: "/fixture/other", args: [] }],
+    async requestApproval(prompt) { approvals.push(prompt.toolName); return "reject"; },
+  });
+  expect(log.requests.find(({ method }) => method === "session/new")?.params).toEqual({
+    cwd: workspace,
+    mcpServers: [
+      { name: "uya", command: "/fixture/uya", args: ["--stdio"], env: [{ name: "UYA_FIXTURE", value: "enabled" }] },
+      { name: "other-MCP", command: "/fixture/other", args: [], env: [] },
+    ],
+  });
+  expect(log.decisions).toEqual(selected("permit-once", "permit-once", "permit-once", "permit-session", "deny", "deny", "deny"));
+  expect(approvals).toEqual(accessMode === "agent" ? ["mcp__other-MCP__tool", "terminal"] : []);
+});
+
+test.each(["isolated", "read-only", "agent"] as const)("ACP ignores MCP in effective isolation requested as %s", async (accessMode) => {
+  const { log } = await runFixture({ tools: [{ toolCall: { name: "mcp__uya__lookup" } }] }, {
+    accessMode, workspacePath: accessMode === "isolated" ? workspace : undefined,
+    mcpServers: [uyaMcpServer, { ...uyaMcpServer, name: "../unsafe" }],
+  });
+  expect(log.requests.find(({ method }) => method === "session/new")?.params.mcpServers).toEqual([]);
+  expect(log.decisions).toEqual(selected("deny"));
+});
+
+test("ACP rejects an invalid MCP server name before opening a workspace session", async () => {
+  const pool = new CapturingPool();
+  const { run } = startFixture({}, {
+    accessMode: "agent", workspacePath: workspace, mcpServers: [{ ...uyaMcpServer, name: "../unsafe" }],
+  }, pool);
+  await expect(run).rejects.toThrow("Invalid MCP server name.");
+  expect(pool.session).toBeUndefined();
+});
+
 test("agent approval distinguishes a one-time decision, a session grant, and rejection", async () => {
   const pool = new AcpSessionPool();
   const fixture: Fixture = {
@@ -346,6 +413,94 @@ test("warm turns send only the current prompt and apply model and effort changes
   const third = await runFixture({}, nextRequest, pool);
   expect(third.log.requests.slice(-2).map(({ method }) => method)).toEqual(["session/prompt", "session/prompt"]);
   expect(new Set(third.log.requests.map(({ id }) => id)).size).toBe(third.log.requests.length);
+});
+
+test("warm ACP turns update the same bridge config after the source scratch directory is removed", async () => {
+  const pool = new AcpSessionPool();
+  const conversationKey = "mcp-bridge";
+  const request = { conversationKey, accessMode: "read-only", workspacePath: workspace } as const;
+  const runWithBridge = async (config: BridgeConfig) => {
+    const scratch = await mkdtemp(join(tmpdir(), "uya-acp-test-"));
+    const source = join(scratch, "uya-mcp-bridge.json");
+    try {
+      await writeFile(source, JSON.stringify(config), { mode: 0o600 });
+      const result = await runFixture({ readBridgeConfig: "prompt" }, {
+        ...request, mcpServers: [{ ...uyaMcpServer, args: ["--stdio", source] }],
+      }, pool);
+      return { ...result, source };
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  };
+
+  const firstConfig = { url: "http://127.0.0.1:10001", token: "fixture-first" };
+  const first = await runWithBridge(firstConfig);
+  const bridgePath = first.log.bridge?.path;
+  if (!bridgePath) throw new Error("Expected a session-owned bridge path.");
+  expect(first.log.bridge?.config).toEqual(firstConfig);
+  expect(bridgePath).not.toBe(first.source);
+  expect(existsSync(first.source)).toBe(false);
+  if (process.platform !== "win32") expect((await stat(bridgePath)).mode & 0o777).toBe(0o600);
+
+  const secondConfig = { url: "http://127.0.0.1:10002", token: "fixture-second" };
+  const second = await runWithBridge(secondConfig);
+  expect(second.usage.providerSessionId).toBe(first.usage.providerSessionId);
+  expect(second.log.requests.map(({ method }) => method)).toEqual(["initialize", "session/new", "session/prompt", "session/prompt"]);
+  expect(second.log.bridge).toEqual({ path: bridgePath, config: secondConfig });
+  expect(existsSync(second.source)).toBe(false);
+
+  const { run } = startFixture({}, { ...request, mcpServers: [{ ...uyaMcpServer, args: ["--stdio", second.source] }] }, pool);
+  await expect(run).rejects.toThrow("Could not stage the ACP MCP bridge configuration.");
+  expect(existsSync(dirname(bridgePath))).toBe(false);
+
+  const restarted = await runWithBridge(secondConfig);
+  expect(restarted.usage.providerSessionId).not.toBe(first.usage.providerSessionId);
+  await pool.closeConversation(conversationKey);
+  expect(existsSync(restarted.log.bridge?.path ?? "")).toBe(false);
+});
+
+test("ACP reuses warm session with --mcp-stdio when its Uya bridge config rotates", async () => {
+  const pool = new AcpSessionPool();
+  const scratch = await mkdtemp(join(tmpdir(), "uya-acp-test-"));
+  const source = join(scratch, "uya-mcp-bridge.json");
+  const request: FixtureRequest = {
+    accessMode: "agent", conversationKey: "warm-stdio-bridge", workspacePath: workspace,
+    mcpServers: [{ ...uyaMcpServer, args: ["--mcp-stdio", source] }],
+  };
+  try {
+    const firstConfig = { url: "http://127.0.0.1:10001/mcp", token: "fixture-first" };
+    await writeFile(source, JSON.stringify(firstConfig), { mode: 0o600 });
+    const first = await runFixture({ readBridgeConfig: "prompt" }, request, pool);
+    expect(first.log.bridge?.config).toEqual(firstConfig);
+
+    const secondConfig = { url: "http://127.0.0.1:10002/mcp", token: "fixture-second" };
+    const next = join(scratch, "next.json");
+    await writeFile(next, JSON.stringify(secondConfig), { mode: 0o600 });
+    await rename(next, source);
+    const second = await runFixture({ readBridgeConfig: "prompt" }, request, pool);
+    expect(second.usage.providerSessionId).toBe(first.usage.providerSessionId);
+    expect(second.log.bridge?.config).toEqual(secondConfig);
+  } finally {
+    await pool.closeAll();
+    await rm(scratch, { force: true, recursive: true });
+  }
+});
+
+test("ACP replaces a warm session when the MCP server setup changes or is removed", async () => {
+  const pool = new AcpSessionPool();
+  const request = { conversationKey: "mcp-session-key", accessMode: "agent", workspacePath: workspace } as const;
+  const fixture = { tools: [{ toolCall: { name: "uya_lookup" } }] };
+  const initial = await runFixture(fixture, request, pool);
+  const added = await runFixture(fixture, { ...request, mcpServers: [uyaMcpServer] }, pool);
+  const changed = await runFixture(fixture, { ...request, mcpServers: [{ ...uyaMcpServer, args: ["--other"] }] }, pool);
+  const removed = await runFixture(fixture, { ...request, mcpServers: [] }, pool);
+  expect(new Set([initial, added, changed, removed].map(({ usage }) => usage.providerSessionId)).size).toBe(4);
+  expect(added.log.decisions).toEqual(selected("permit-once"));
+  expect(changed.log.requests.find(({ method }) => method === "session/new")?.params.mcpServers).toMatchObject([
+    { name: "uya", args: ["--other"] },
+  ]);
+  expect(removed.log.requests.find(({ method }) => method === "session/new")?.params.mcpServers).toEqual([]);
+  expect(removed.log.decisions).toEqual(selected("deny"));
 });
 
 test("structured tool updates carry forward metadata and cap output at 4 KiB", async () => {

@@ -36,6 +36,13 @@ export interface AdapterApprovalPrompt {
   options: ApprovalOption[];
 }
 
+export interface McpStdioServerSpec {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
 export interface AdapterRequest {
   provider: Provider;
   prompt: string;
@@ -46,6 +53,7 @@ export interface AdapterRequest {
   workingDirectory?: string;
   conversationKey?: string;
   providerSessionId?: string;
+  mcpServers?: readonly McpStdioServerSpec[];
   requestApproval?: (prompt: AdapterApprovalPrompt) => Promise<ApprovalDecision>;
   signal: AbortSignal;
   output: AdapterOutput;

@@ -28,6 +28,7 @@ interface CliDefinition {
   shutdown?: () => Promise<void> | void;
   supportedModes?: ExecutionMode[];
   supportsPersistentSession?: boolean;
+  supportsMcp?: boolean;
   blocked?: () => string | undefined;
   detail?: string;
 }
@@ -44,7 +45,7 @@ interface CachedCliModels {
 function cliAdapter(
   {
     id, name, command: configured, terminalArgs, prepare, run: customRun,
-    closeSession, shutdown, supportedModes, supportsPersistentSession, blocked, detail,
+    closeSession, shutdown, supportedModes, supportsPersistentSession, supportsMcp, blocked, detail,
   }: CliDefinition,
   discoverModels: CliModelDiscoverer,
 ): ProviderAdapter {
@@ -95,6 +96,7 @@ function cliAdapter(
         ...(canStructure ? {
           supportedModes: supportedModes ?? ["isolated"],
           supportsPersistentSession: Boolean(supportsPersistentSession),
+          ...(supportsMcp ? { supportsMcp: true } : {}),
         } : {}),
         detail: unavailable ?? detail,
       };
@@ -202,20 +204,20 @@ export class ProviderRegistry {
     const adapters = [
       cli({
         id: "codex", name: "Codex", command: "codex", prepare: prepareCodex,
-        supportedModes: workspaceModes, supportsPersistentSession: true,
+        supportedModes: workspaceModes, supportsPersistentSession: true, supportsMcp: true,
       }),
       cli({
         id: "claude", name: "Claude Code", command: "claude", prepare: prepareClaude,
-        supportedModes: workspaceModes, supportsPersistentSession: true,
+        supportedModes: workspaceModes, supportsPersistentSession: true, supportsMcp: true,
       }),
       cli({
         id: "antigravity", name: "Antigravity", command: "agy", run: runAntigravity,
         closeSession: closeAcpConversation, shutdown: shutdownAcpSessions,
-        supportedModes: workspaceModes, supportsPersistentSession: true,
+        supportedModes: workspaceModes, supportsPersistentSession: true, supportsMcp: true,
       }),
       cli({
         id: "gemini", name: "Gemini CLI", command: "gemini", prepare: prepareGeminiCli, blocked: geminiBlocked,
-        supportedModes: workspaceModes, supportsPersistentSession: false,
+        supportedModes: workspaceModes, supportsPersistentSession: false, supportsMcp: true,
       }),
       cli({
         id: "gemini-api", name: "Gemini API", command: "gemini-api", terminalArgs: ["explore"], prepare: prepareGeminiApi,
@@ -227,7 +229,7 @@ export class ProviderRegistry {
       }),
       cli({
         id: "opencode", name: "OpenCode", command: "opencode", prepare: prepareOpenCode, blocked: openCodeBlocked,
-        supportedModes: workspaceModes, supportsPersistentSession: false,
+        supportedModes: workspaceModes, supportsPersistentSession: false, supportsMcp: true,
         detail: "Structured uses authentication from the CLI environment. Saved profiles are available in Terminal.",
       }),
       cli({ id: "kimi", name: "Kimi Code", command: "kimi" }),

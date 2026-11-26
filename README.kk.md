@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.kk.md"><strong>Қазақша</strong></a> · <a href="docs/arena.md">Worktree Arena</a> · <a href="docs/providers.md">Провайдерлер</a> · <a href="docs/architecture.md">Архитектура</a> · <a href="docs/security.md">Қауіпсіздік</a>
+  <a href="README.md">English</a> · <a href="README.kk.md"><strong>Қазақша</strong></a> · <a href="docs/synapse.md">Uya Synapse</a> · <a href="docs/arena.md">Worktree Arena</a> · <a href="docs/providers.md">Провайдерлер</a> · <a href="docs/architecture.md">Архитектура</a> · <a href="docs/security.md">Қауіпсіздік</a>
 </p>
 
 <p align="center">
@@ -163,7 +163,8 @@ bun run desktop:test
 
 ## Құжаттама
 
-- **[Архитектура](docs/architecture.md)** — Tauri қабығы, `127.0.0.1` Bun sidecar, ACP сессия пулы, SQLite v4 сұлбасы және асинхронды Verify қозғалтқышы.
+- **[Uya Synapse](docs/synapse.md)** — Уақытша `uya` MCP брокері, Living Capability Matrix (`arena.ai` Elo + жергілікті метрикалар), көп қадамды миссиялар және мультимодальды Capability Hub (ElevenLabs, Suno, fal.ai, REST/MCP).
+- **[Архитектура](docs/architecture.md)** — Tauri қабығы, `127.0.0.1` Bun sidecar, ACP сессия пулы, SQLite v5 сұлбасы және асинхронды Verify қозғалтқышы.
 - **[Worktree Agent Arena](docs/arena.md)** — Оқшауланған параллель кодтау, WIP көшіру, слот бойынша тексеру және атомдық қолдану.
 - **[Провайдерлер](docs/providers.md)** — Барлық провайдерлер мүмкіндігі, режим жалаушалары және Custom CLI құмсалғышы.
 - **[Қауіпсіздік моделі](docs/security.md)** — Loopback токен авторизациясы, жұмыс кеңістігін оқшаулау, қорғалған файлдар және fail-closed растаулар.

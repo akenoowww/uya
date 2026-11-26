@@ -4,6 +4,16 @@ All notable changes to **Uya** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-27
+
+### Added
+
+- **Uya Synapse — Universal Ephemeral `uya` MCP Broker**: Injects a run-scoped, token-authenticated (`0600` scratch bridge file, constant-time `X-Uya-Mcp-Token` verification, newline + `Content-Length` JSON-RPC framing) `uya` MCP server across **Codex**, **Claude Code**, **Antigravity (`agy` ACP)** (with atomic per-turn bridge rotation preserving warm pooled sessions), **Gemini CLI**, and **OpenCode** in `Explore` and `Agent` modes (`Isolated` mode stays completely locked down), plus structured `uya-action` fallback blocks for stateless and local runtimes.
+- **Symbiotic Specialist Consultation, Red Team & Workbench Control**: Agents inside Uya can inspect peer splits and capabilities (`uya_get_workbench`), open files directly in Monaco (`uya_open_file`), run workspace verification (`uya_run_verify`), consult the highest-rated specialist synchronously without dropping their own warm session (`uya_consult_specialist`), or launch parallel Security / Edge-Case / Architecture critiques (`uya_red_team`).
+- **Living Capability Matrix (`arena.ai` Elo + Local Empirical Telemetry)**: Combines offline-seeded and HTTPS-syncable **`arena.ai`** domain Elo ratings (`code`, `webdev`, `text`, `vision`, `search`) with local SQLite v5 Verify pass rates, Worktree Arena winner counts, TTFT speed, token cache-hit ratios, a 28-point warm-session cache bonus, and per-domain manual overrides (`/matrix`).
+- **Open Capability Hub & `0600` Secret Vault (`/capabilities`)**: Owner-only secret vault (`O_NOFOLLOW`, single-link verification, multi-encoding secret redaction, DNS-rebinding-resistant SSRF guards) with built-in multimodal packs (**ElevenLabs Voiceover**, **Suno Music Generator**, **fal.ai FLUX Image**, **OpenAI Speech TTS**), custom global/project REST packs (including async job polling), and `mcp-stdio` / `mcp-http` packs.
+- **Multimodal Artifact Cards, Gatekeeper Missions & Split Forwarding**: Inline `<ArtifactCard>` rendering `<audio>`, click-to-zoom `<img>`, and `<video>` previews via confined `workspace.readBinary` (`media-src 'self' data: blob:` CSP), `<SynapseCallCard>` call activity, interactive `<MissionCard>` with per-step provider/effort overrides and shared canonical `WorkspaceTurnLock` (`/mission`), one-click **Forward** to bounce replies across splits, and `docs/synapse.md`.
+
 ## [0.4.0] - 2026-11-26
 
 ### Added

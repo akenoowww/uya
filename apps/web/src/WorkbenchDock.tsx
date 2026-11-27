@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { Loader, Stack, Text } from "@mantine/core";
 import { DockviewReact } from "dockview-react";
 import type { IDockviewPanelProps } from "dockview-react";
@@ -165,22 +165,12 @@ function ChatTool({ id }: { id: string }) {
   } = useWorkbench();
   const {
     bridge, root, recentWorkspaces, index, config, provider, providers, draft, promptHistory, busy,
-    choosingProject, contextCount, hasSelection, missionsById, peerSplits,
+    choosingProject, contextCount, hasSelection, missionsById, panes,
   } = useWorkbenchState(useShallow((state) => {
     const panes = state.dock.chatPanes;
     const paneIndex = panes.findIndex((pane) => pane.id === id);
     const pane = panes[paneIndex];
     const paneConfig = pane?.config ?? emptyConfig;
-    const peers = panes.flatMap((other, otherIndex) => {
-      if (other.id === id || other.config.mode === "terminal") return [];
-      const otherProvider = providerForPane(state.providers, other.config, otherIndex);
-      if (!otherProvider?.structured) return [];
-      return [{
-        id: other.id,
-        title: paneDisplayTitle(otherProvider, other.config, otherIndex),
-        providerId: otherProvider.id,
-      }];
-    });
     return {
       bridge: state.bridge,
       root: state.workspace?.path ?? null,
@@ -196,9 +186,20 @@ function ChatTool({ id }: { id: string }) {
       contextCount: state.contextPaths.length + state.attachments.length,
       hasSelection: Boolean(state.selection),
       missionsById: state.missionsById,
-      peerSplits: peers,
+      panes,
     };
   }));
+
+  const peerSplits = useMemo(() => panes.flatMap((other, otherIndex) => {
+    if (other.id === id || other.config.mode === "terminal") return [];
+    const otherProvider = providerForPane(providers, other.config, otherIndex);
+    if (!otherProvider?.structured) return [];
+    return [{
+      id: other.id,
+      title: paneDisplayTitle(otherProvider, other.config, otherIndex),
+      providerId: otherProvider.id,
+    }];
+  }), [panes, providers, id]);
 
   const details = useWorkbenchState(useShallow((state) =>
     (state.paneRuns[conversationKey(root, config.conversationId)] ?? []).flatMap((runId) => {
